@@ -1,0 +1,178 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable SDK version to publish (for example 0.1.0)
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Resolve release version
+        id: release_version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          if [[ -z "$version" ]]; then
+            echo "missing_version" >&2
+            exit 1
+          fi
+
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check published package state
+        id: published_state
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          release_version = os.environ["RELEASE_VERSION"]
+          github_output = Path(os.environ["GITHUB_OUTPUT"])
+
+          try:
+            with urllib.request.urlopen("https://pypi.org/pypi/debugbundle-python/json") as response:
+              metadata = json.load(response)
+          except urllib.error.HTTPError as error:
+            if error.code != 404:
+              raise
+            state = "none"
+          else:
+            state = "all" if release_version in metadata.get("releases", {}) else "none"
+
+          with github_output.open("a", encoding="utf-8") as handle:
+            handle.write(f"state={state}\n")
+          PY
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Note already published package release
+        if: steps.published_state.outputs.state == 'all'
+        run: echo "Release version ${{ steps.release_version.outputs.value }} is already published for debugbundle-python; skipping publish steps."
+
+      - name: Validate package version
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+
+          expected_version = os.environ["RELEASE_VERSION"]
+          if "-" in expected_version:
+            raise SystemExit(f"unexpected_prerelease_version:{expected_version}")
+
+          with open("pyproject.toml", "rb") as handle:
+            pyproject = tomllib.load(handle)
+
+          package_version = pyproject["project"]["version"]
+          if package_version != expected_version:
+            raise SystemExit(f"package_version_mismatch:{package_version}:{expected_version}")
+          PY
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Run quality gates
+        run: |
+          ruff check src tests
+          mypy src
+          pytest --cov=src/debugbundle --cov-report=term-missing --cov-report=json:coverage.json -q
+          python scripts/check_coverage.py coverage.json
+
+      - name: Build package artifacts
+        if: steps.published_state.outputs.state == 'none'
+        run: python -m build
+
+      - name: Validate built metadata
+        if: steps.published_state.outputs.state == 'none'
+        run: python -m twine check dist/*
+
+      - name: Smoke test built artifacts
+        if: steps.published_state.outputs.state == 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmpdir="$(mktemp -d)"
+          python -m venv "$tmpdir/venv"
+          . "$tmpdir/venv/bin/activate"
+          pip install --upgrade pip
+          pip install dist/debugbundle_python-${RELEASE_VERSION}-py3-none-any.whl
+          python - <<'PY'
+          import debugbundle
+
+          assert hasattr(debugbundle, "init")
+          assert hasattr(debugbundle, "capture_exception")
+          PY
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Ensure PyPI token is configured
+        if: steps.published_state.outputs.state == 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${PYPI_API_TOKEN:-}" ]]; then
+            echo "Missing PYPI_API_TOKEN secret for release publishing." >&2
+            exit 1
+          fi
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Publish to PyPI
+        if: steps.published_state.outputs.state == 'none'
+        run: twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Smoke test published package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmpdir="$(mktemp -d)"
+          python -m venv "$tmpdir/venv"
+          . "$tmpdir/venv/bin/activate"
+          pip install --upgrade pip
+          pip install debugbundle-python==${RELEASE_VERSION}
+          python - <<'PY'
+          import debugbundle
+
+          assert hasattr(debugbundle, "init")
+          assert hasattr(debugbundle, "capture_exception")
+          PY
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}

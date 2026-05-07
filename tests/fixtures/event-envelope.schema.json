@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://debugbundle.com/schemas/event-envelope-python-fixture.json",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/backend_exception_envelope"
+    },
+    {
+      "$ref": "#/$defs/request_event_envelope"
+    },
+    {
+      "$ref": "#/$defs/log_event_envelope"
+    },
+    {
+      "$ref": "#/$defs/error_suppressed_envelope"
+    },
+    {
+      "$ref": "#/$defs/probe_event_envelope"
+    }
+  ],
+  "$defs": {
+    "string_map": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "environment"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "runtime": { "type": ["string", "null"], "minLength": 1 },
+        "framework": { "type": ["string", "null"], "minLength": 1 },
+        "environment": { "type": "string", "minLength": 1 }
+      }
+    },
+    "correlation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": { "type": ["string", "null"] },
+        "trace_id": { "type": ["string", "null"] },
+        "session_id": { "type": ["string", "null"] },
+        "user_id_hash": { "type": ["string", "null"] }
+      }
+    },
+    "inline_probe_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "data", "timestamp", "activation_id"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "data": { "$ref": "#/$defs/string_map" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "activation_id": { "type": ["string", "null"], "format": "uuid" }
+      }
+    },
+    "inline_probe_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "items"],
+      "properties": {
+        "version": { "const": 1 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/inline_probe_item" }
+        }
+      }
+    },
+    "request_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path", "query", "headers"],
+      "properties": {
+        "method": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "query": { "$ref": "#/$defs/string_map" },
+        "headers": { "$ref": "#/$defs/string_map" },
+        "body": {}
+      }
+    },
+    "response_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status_code"],
+      "properties": {
+        "status_code": { "type": "integer", "minimum": 0 },
+        "headers": { "$ref": "#/$defs/string_map" },
+        "body": {}
+      }
+    },
+    "envelope_base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "event_id",
+        "event_type",
+        "sdk_name",
+        "sdk_version",
+        "service",
+        "occurred_at",
+        "correlation",
+        "payload"
+      ],
+      "properties": {
+        "schema_version": { "type": "string", "minLength": 1 },
+        "event_id": { "type": "string", "format": "uuid" },
+        "event_type": { "type": "string" },
+        "project_token": { "type": "string", "minLength": 1 },
+        "project_id": { "type": ["string", "null"], "format": "uuid" },
+        "sdk_name": { "type": "string", "minLength": 1 },
+        "sdk_version": { "type": "string", "minLength": 1 },
+        "sdk_language": { "type": "string", "minLength": 1 },
+        "service": { "$ref": "#/$defs/service" },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "correlation": { "$ref": "#/$defs/correlation" },
+        "payload": {}
+      }
+    },
+    "backend_exception_envelope": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope_base" },
+        {
+          "properties": {
+            "event_type": { "const": "backend_exception" },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "message", "stack", "handled", "request", "response", "runtime"],
+              "properties": {
+                "name": { "type": "string", "minLength": 1 },
+                "message": { "type": "string", "minLength": 1 },
+                "stack": { "type": "string", "minLength": 1 },
+                "handled": { "type": "boolean" },
+                "request": { "$ref": "#/$defs/request_object" },
+                "response": { "$ref": "#/$defs/response_object" },
+                "runtime": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["version"],
+                  "properties": {
+                    "version": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "probe_data": { "$ref": "#/$defs/inline_probe_data" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "request_event_envelope": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope_base" },
+        {
+          "properties": {
+            "event_type": { "const": "request_event" },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["method", "path", "query", "headers", "response_status", "duration_ms"],
+              "properties": {
+                "method": { "type": "string", "minLength": 1 },
+                "path": { "type": "string", "minLength": 1 },
+                "query": { "$ref": "#/$defs/string_map" },
+                "headers": { "$ref": "#/$defs/string_map" },
+                "body": {},
+                "response_status": { "type": "integer", "minimum": 0 },
+                "duration_ms": { "type": "number", "minimum": 0 },
+                "route_template": { "type": ["string", "null"], "minLength": 1 },
+                "response_headers": { "$ref": "#/$defs/string_map" },
+                "response_body": {}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "log_event_envelope": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope_base" },
+        {
+          "properties": {
+            "event_type": { "const": "log_event" },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["level", "message", "attributes"],
+              "properties": {
+                "level": { "type": "string", "minLength": 1 },
+                "message": { "type": "string", "minLength": 1 },
+                "attributes": { "$ref": "#/$defs/string_map" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "error_suppressed_envelope": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope_base" },
+        {
+          "properties": {
+            "event_type": { "const": "error_suppressed" },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["fingerprint", "suppressed_count", "window_seconds", "first_seen", "last_seen"],
+              "properties": {
+                "fingerprint": { "type": "string", "minLength": 1 },
+                "suppressed_count": { "type": "integer", "minimum": 0 },
+                "window_seconds": { "type": "integer", "exclusiveMinimum": 0 },
+                "first_seen": { "type": "string", "format": "date-time" },
+                "last_seen": { "type": "string", "format": "date-time" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "probe_event_envelope": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope_base" },
+        {
+          "properties": {
+            "event_type": { "const": "probe_event" },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["label", "data", "activation_id", "probe_label_pattern"],
+              "properties": {
+                "label": { "type": "string", "minLength": 1 },
+                "data": { "$ref": "#/$defs/string_map" },
+                "activation_id": { "type": ["string", "null"], "format": "uuid" },
+                "probe_label_pattern": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
