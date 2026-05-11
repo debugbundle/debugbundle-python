@@ -166,12 +166,36 @@ def test_preserves_correlation_trace_id() -> None:
 
 def test_accepts_all_supported_event_types() -> None:
     handler = BrowserRelayHandler(allowed_origins=["https://example.com"])
-    for event_type in ("frontend_exception", "error_suppressed", "frontend_breadcrumb", "probe_event"):
+    for event_type in ("frontend_exception", "error_suppressed", "frontend_breadcrumb", "request_event", "probe_event"):
         evt = _valid_event(event_type)
         response = handler.handle(
             _make_request(body={"batch": [evt]}, ip_address=f"10.0.0.{hash(event_type) % 254 + 1}")
         )
         assert response.status == 202, f"Failed for event type: {event_type}"
+
+
+def test_accepts_browser_request_event_payloads() -> None:
+    accepted: list[BrowserRelayAcceptedBatch] = []
+    handler = BrowserRelayHandler(
+        allowed_origins=["https://example.com"],
+        on_accept=lambda batch: accepted.append(batch),
+    )
+    event = _valid_event("request_event")
+    event["payload"] = {
+        "method": "POST",
+        "path": "/v1/billing/checkout",
+        "query": {"plan": "team"},
+        "headers": {},
+        "response_status": 503,
+        "duration_ms": 84,
+    }
+
+    response = handler.handle(_make_request(body={"batch": [event]}))
+
+    assert response.status == 202
+    assert len(accepted) == 1
+    assert accepted[0].events[0]["event_type"] == "request_event"
+    assert accepted[0].events[0]["payload"]["response_status"] == 503
 
 
 def test_rejects_event_with_missing_required_fields() -> None:

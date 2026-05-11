@@ -111,8 +111,8 @@ def test_remote_config_uses_etag_and_activates_heavy_probes_only_while_directive
                     "capture_policy": {
                         "preset": "balanced",
                         "capture_logs": "warning",
-                        "capture_request_events": "all",
-                        "capture_breadcrumbs": "local_only",
+                        "capture_request_events": "failures_only",
+                        "capture_breadcrumbs": "exception_only",
                         "capture_probe_events": "standalone_when_activated",
                     },
                 },
@@ -173,14 +173,17 @@ def test_failed_init_config_fetch_falls_back_to_minimal_policy() -> None:
         probes_poll_interval=25000,
     )
 
-    sdk.capture_message("warning still allowed", level="warning")
+    sdk.capture_message("warning blocked", level="warning")
+    sdk.capture_message("error still allowed", level="error")
     sdk.capture_message("info blocked", level="info")
     sdk.capture_request({"method": "GET", "path": "/ok", "headers": {}}, {"status_code": 200})
+    sdk.capture_request({"method": "GET", "path": "/boom", "headers": {}}, {"status_code": 503})
     sdk.flush()
 
     events = _events(transport)
-    assert [event["event_type"] for event in events] == ["log_event"]
-    assert events[0]["payload"]["message"] == "warning still allowed"
+    assert [event["event_type"] for event in events] == ["log_event", "request_event"]
+    assert events[0]["payload"]["message"] == "error still allowed"
+    assert events[1]["payload"]["response_status"] == 503
 
 
 def test_capture_policy_filters_logs_and_request_events_from_remote_config() -> None:

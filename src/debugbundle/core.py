@@ -590,19 +590,25 @@ class DebugBundleSdk:
 
     def _should_capture_request_event(self, response: Mapping[str, object] | None) -> bool:
         policy = self._capture_policy.capture_request_events
+        status_code = None
+        if response is not None:
+            candidate = response.get("status_code") or response.get("response_status")
+            if isinstance(candidate, int):
+                status_code = candidate
+        if status_code is not None and status_code >= 500:
+            return True
         if policy == "off":
             return False
         if policy == "all":
             return True
         if response is None:
             return policy == "filtered"
-        status_code = response.get("status_code") or response.get("response_status")
-        if not isinstance(status_code, int):
+        if status_code is None:
             return policy == "filtered"
         if policy == "failures_only":
-            return status_code >= 500
+            return False
         if policy == "filtered":
-            return status_code >= 500
+            return False
         return True
 
     def _emit_probe_events(self, label: str, data: dict[str, object], directives: list[RemoteProbeDirective]) -> None:

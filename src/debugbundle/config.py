@@ -37,15 +37,15 @@ class RemoteConfigSnapshot:
 BALANCED_CAPTURE_POLICY = CapturePolicy(
     preset="balanced",
     capture_logs="warning",
-    capture_request_events="all",
-    capture_breadcrumbs="local_only",
-    capture_probe_events="standalone_when_activated",
+    capture_request_events="failures_only",
+    capture_breadcrumbs="exception_only",
+    capture_probe_events="buffer_only",
 )
 
 MINIMAL_CAPTURE_POLICY = CapturePolicy(
     preset="minimal",
-    capture_logs="warning",
-    capture_request_events="off",
+    capture_logs="error",
+    capture_request_events="failures_only",
     capture_breadcrumbs="local_only",
     capture_probe_events="buffer_only",
 )

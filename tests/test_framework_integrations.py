@@ -178,14 +178,14 @@ def test_django_middleware_captures_requests_logs_and_errors() -> None:
 
     factory = RequestFactory()
 
-    def ok_response(request: object) -> HttpResponse:
-        logging.getLogger("django-test").warning("django ok warning")
-        return HttpResponse("ok")
+    def server_error_response(request: object) -> HttpResponse:
+        logging.getLogger("django-test").warning("django server warning")
+        return HttpResponse("failed", status=503)
 
-    middleware = DebugBundleDjangoMiddleware(ok_response, sdk=sdk)
-    request = factory.get("/ok", HTTP_X_DEBUGBUNDLE_TRACE_ID="trace-django")
+    middleware = DebugBundleDjangoMiddleware(server_error_response, sdk=sdk)
+    request = factory.get("/failed", HTTP_X_DEBUGBUNDLE_TRACE_ID="trace-django")
     response = middleware(request)
-    assert response.status_code == 200
+    assert response.status_code == 503
 
     raising_middleware = DebugBundleDjangoMiddleware(
         lambda request: (_ for _ in ()).throw(RuntimeError("django failure")),

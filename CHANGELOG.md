@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-11
+
+### Changed
+- Aligned Python SDK capture-policy fallback defaults with the service presets so minimal and balanced modes capture 5xx request failures by default.
+
+### Fixed
+- Preserved 5xx request-event capture even when standalone request capture is otherwise disabled.
+- Python browser relay validation now accepts browser-originated `request_event` payloads for promoted 5xx request failures.
+
 ## [0.1.0] - 2026-05-07
 
 ### Added
