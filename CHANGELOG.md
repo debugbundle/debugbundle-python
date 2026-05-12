@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-12
+
+### Added
+- Safe backend runtime process facts on `backend_exception.payload.runtime`, including platform, architecture, pid, cwd, uptime, hostname, thread id, and best-effort memory metadata without reading environment variables.
+
 ## [0.1.1] - 2026-05-11
 
 ### Changed

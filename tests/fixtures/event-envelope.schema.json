@@ -140,7 +140,27 @@
                   "additionalProperties": false,
                   "required": ["version"],
                   "properties": {
-                    "version": { "type": "string", "minLength": 1 }
+                    "version": { "type": "string", "minLength": 1 },
+                    "platform": { "type": ["string", "null"] },
+                    "arch": { "type": ["string", "null"] },
+                    "pid": { "type": ["integer", "null"] },
+                    "cwd": { "type": ["string", "null"] },
+                    "uptime_sec": { "type": ["number", "null"], "minimum": 0 },
+                    "hostname": { "type": ["string", "null"] },
+                    "thread_id": { "type": ["integer", "string", "null"] },
+                    "framework_version": { "type": ["string", "null"] },
+                    "memory": {
+                      "type": ["object", "null"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "rss": { "type": ["number", "null"] },
+                        "heap_total": { "type": ["number", "null"] },
+                        "heap_used": { "type": ["number", "null"] },
+                        "external": { "type": ["number", "null"] },
+                        "peak": { "type": ["number", "null"] }
+                      }
+                    },
+                    "framework_extras": { "type": ["object", "null"] }
                   }
                 },
                 "probe_data": { "$ref": "#/$defs/inline_probe_data" }

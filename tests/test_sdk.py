@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import sys
 import uuid
 from dataclasses import dataclass
 
@@ -234,7 +235,18 @@ def test_emits_contract_compliant_event_envelopes() -> None:
     assert exception_event["payload"]["handled"] is True
     assert exception_event["payload"]["request"]["path"] == "/checkout"
     assert exception_event["payload"]["response"]["status_code"] == 500
-    assert exception_event["payload"]["runtime"] == {"version": platform.python_version()}
+    runtime = exception_event["payload"]["runtime"]
+    assert runtime["version"] == platform.python_version()
+    assert runtime["platform"] == sys.platform
+    assert isinstance(runtime["arch"], str)
+    assert isinstance(runtime["pid"], int)
+    assert isinstance(runtime["cwd"], str)
+    assert isinstance(runtime["uptime_sec"], (int, float))
+    assert runtime["uptime_sec"] >= 0
+    assert isinstance(runtime["hostname"], str)
+    assert isinstance(runtime["thread_id"], int)
+    assert isinstance(runtime["memory"], dict)
+    assert "environment" not in runtime
 
 
 def test_suppresses_duplicate_exceptions_after_the_first_three() -> None:

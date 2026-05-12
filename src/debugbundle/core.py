@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import platform
+import socket
 import sys
 import threading
+import time
 import traceback
 import uuid
 from collections import deque
@@ -32,10 +35,16 @@ from .suppression import EventSuppressionTracker
 from .transport import HttpTransport, Transport, coerce_transport_response
 from .trigger_token import resolve_request_trigger_directives
 
+try:
+    import resource
+except ImportError:  # pragma: no cover - resource is unavailable on some platforms.
+    resource = None  # type: ignore[assignment]
+
 DEFAULT_BATCH_SIZE = 25
 DEFAULT_FLUSH_INTERVAL = 5.0
 DEFAULT_ENDPOINT = "https://api.debugbundle.com/v1/events"
 DEFAULT_LOG_LEVEL = "warning"
+PROCESS_START_MONOTONIC = time.monotonic()
 SCHEMA_VERSION = "2026-03-01"
 LEVEL_RANKS = {
     "debug": 10,
@@ -225,7 +234,7 @@ class DebugBundleSdk:
                 "handled": handled,
                 "request": request_payload,
                 "response": response_payload,
-                "runtime": {"version": platform.python_version()},
+                "runtime": _runtime_process_facts(),
             }
             if self._probe_flush_on_error:
                 probe_data = self._build_probe_data()
@@ -697,6 +706,51 @@ def _redact_mapping(value: object, redact_fields: set[str]) -> Any:
     if isinstance(value, Mapping):
         return redact_value(value, redact_fields)
     return value
+
+
+def _runtime_process_facts() -> dict[str, object]:
+    return {
+        "version": platform.python_version(),
+        "platform": sys.platform,
+        "arch": platform.machine() or None,
+        "pid": os.getpid(),
+        "cwd": _safe_cwd(),
+        "uptime_sec": round(max(0.0, time.monotonic() - PROCESS_START_MONOTONIC), 3),
+        "hostname": _safe_hostname(),
+        "thread_id": threading.get_ident(),
+        "memory": _memory_facts(),
+    }
+
+
+def _safe_cwd() -> str | None:
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
+
+
+def _safe_hostname() -> str | None:
+    try:
+        return socket.gethostname()
+    except OSError:
+        return None
+
+
+def _memory_facts() -> dict[str, object]:
+    memory: dict[str, object] = {
+        "rss": None,
+        "heap_total": None,
+        "heap_used": None,
+        "external": None,
+        "peak": None,
+    }
+    if resource is None:
+        return memory
+
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    # ru_maxrss is KiB on Linux and bytes on macOS/BSD.
+    memory["peak"] = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
+    return memory
 
 
 def _backend_exception_request_payload(candidate: object | None) -> dict[str, object]:
