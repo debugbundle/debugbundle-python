@@ -227,3 +227,87 @@ def test_capture_policy_filters_logs_and_request_events_from_remote_config() -> 
     assert [event["event_type"] for event in events] == ["log_event", "request_event"]
     assert events[0]["payload"]["message"] == "error kept"
     assert events[1]["payload"]["response_status"] == 503
+
+
+def test_balanced_capture_policy_keeps_request_failure_anomaly_candidates() -> None:
+    clock = ManualClock()
+    fetch = FakeFetch(
+        responses=[
+            FakeConfigResponse(
+                200,
+                {
+                    "probes_enabled": True,
+                    "remote_probes_enabled": True,
+                    "active_probes": [],
+                    "poll_interval_ms": 15000,
+                    "capture_policy": {
+                        "preset": "balanced",
+                        "capture_logs": "warning",
+                        "capture_request_events": "failures_only",
+                        "capture_breadcrumbs": "exception_only",
+                        "capture_probe_events": "buffer_only",
+                    },
+                },
+            )
+        ]
+    )
+    transport = FakeTransport()
+    sdk = DebugBundleSdk(transport=transport, time_provider=clock.time)
+    sdk.init(
+        project_token="dbundle_proj_test",
+        service="checkout-api",
+        environment="production",
+        fetch_impl=fetch,
+    )
+
+    sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 429})
+    sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 404})
+    sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 409})
+    sdk.flush()
+
+    events = _events(transport)
+    request_statuses = [
+        event["payload"]["response_status"]
+        for event in events
+        if event["event_type"] == "request_event"
+    ]
+    assert request_statuses == [429, 404, 409]
+
+
+def test_investigative_capture_policy_promotes_409_even_when_request_capture_is_off() -> None:
+    clock = ManualClock()
+    fetch = FakeFetch(
+        responses=[
+            FakeConfigResponse(
+                200,
+                {
+                    "probes_enabled": True,
+                    "remote_probes_enabled": True,
+                    "active_probes": [],
+                    "poll_interval_ms": 15000,
+                    "capture_policy": {
+                        "preset": "investigative",
+                        "capture_logs": "info",
+                        "capture_request_events": "off",
+                        "capture_breadcrumbs": "standalone",
+                        "capture_probe_events": "standalone_when_activated",
+                    },
+                },
+            )
+        ]
+    )
+    transport = FakeTransport()
+    sdk = DebugBundleSdk(transport=transport, time_provider=clock.time)
+    sdk.init(
+        project_token="dbundle_proj_test",
+        service="checkout-api",
+        environment="production",
+        fetch_impl=fetch,
+    )
+
+    sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 409})
+    sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 404})
+    sdk.flush()
+
+    events = _events(transport)
+    assert [event["payload"]["response_status"] for event in events if event["event_type"] == "request_event"] == [409]

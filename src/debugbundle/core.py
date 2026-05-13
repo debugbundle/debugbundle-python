@@ -53,6 +53,11 @@ LEVEL_RANKS = {
     "error": 40,
     "critical": 50,
 }
+BALANCED_IMMEDIATE_REQUEST_STATUSES = {408, 423, 424, 425, 429}
+INVESTIGATIVE_IMMEDIATE_REQUEST_STATUSES = BALANCED_IMMEDIATE_REQUEST_STATUSES | {409}
+BALANCED_STANDARD_ANOMALY_STATUSES = {401, 403, 404, 409, 422}
+BALANCED_HIGH_VOLUME_ANOMALY_STATUSES = {400, 410}
+INVESTIGATIVE_ANOMALY_STATUSES = BALANCED_STANDARD_ANOMALY_STATUSES | BALANCED_HIGH_VOLUME_ANOMALY_STATUSES
 
 
 @dataclass
@@ -604,7 +609,7 @@ class DebugBundleSdk:
             candidate = response.get("status_code") or response.get("response_status")
             if isinstance(candidate, int):
                 status_code = candidate
-        if status_code is not None and status_code >= 500:
+        if _is_immediate_request_incident_status(status_code, self._capture_policy.preset):
             return True
         if policy == "off":
             return False
@@ -615,7 +620,7 @@ class DebugBundleSdk:
         if status_code is None:
             return policy == "filtered"
         if policy == "failures_only":
-            return False
+            return _is_request_anomaly_candidate_status(status_code, self._capture_policy.preset)
         if policy == "filtered":
             return False
         return True
@@ -844,6 +849,28 @@ def _coerce_optional_string(value: object) -> str | None:
 
 def _iso_now(time_provider: Callable[[], float]) -> str:
     return datetime.fromtimestamp(time_provider(), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _is_immediate_request_incident_status(status_code: int | None, preset: str) -> bool:
+    if status_code is None:
+        return False
+    if status_code >= 500:
+        return True
+    if preset == "investigative":
+        return status_code in INVESTIGATIVE_IMMEDIATE_REQUEST_STATUSES
+    if preset == "balanced":
+        return status_code in BALANCED_IMMEDIATE_REQUEST_STATUSES
+    return False
+
+
+def _is_request_anomaly_candidate_status(status_code: int | None, preset: str) -> bool:
+    if status_code is None or status_code < 400 or status_code >= 500:
+        return False
+    if preset == "investigative":
+        return status_code in INVESTIGATIVE_ANOMALY_STATUSES
+    if preset == "balanced":
+        return status_code in BALANCED_STANDARD_ANOMALY_STATUSES or status_code in BALANCED_HIGH_VOLUME_ANOMALY_STATUSES
+    return False
 
 
 def _time_now() -> float:
