@@ -13,6 +13,7 @@ class CapturePolicy:
     capture_request_events: str
     capture_breadcrumbs: str
     capture_probe_events: str
+    immediate_client_error_statuses: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ BALANCED_CAPTURE_POLICY = CapturePolicy(
     capture_request_events="failures_only",
     capture_breadcrumbs="exception_only",
     capture_probe_events="buffer_only",
+    immediate_client_error_statuses=(),
 )
 
 MINIMAL_CAPTURE_POLICY = CapturePolicy(
@@ -48,6 +50,7 @@ MINIMAL_CAPTURE_POLICY = CapturePolicy(
     capture_request_events="failures_only",
     capture_breadcrumbs="local_only",
     capture_probe_events="buffer_only",
+    immediate_client_error_statuses=(),
 )
 
 
@@ -117,6 +120,9 @@ def _parse_capture_policy(payload: object) -> CapturePolicy | None:
     capture_request_events = _as_non_empty_string(payload.get("capture_request_events"))
     capture_breadcrumbs = _as_non_empty_string(payload.get("capture_breadcrumbs"))
     capture_probe_events = _as_non_empty_string(payload.get("capture_probe_events"))
+    immediate_client_error_statuses = _parse_immediate_client_error_statuses(
+        payload.get("immediate_client_error_statuses")
+    )
 
     if capture_logs not in {"off", "error", "warning", "info"}:
         return None
@@ -126,6 +132,8 @@ def _parse_capture_policy(payload: object) -> CapturePolicy | None:
         return None
     if capture_probe_events not in {"buffer_only", "standalone_when_activated"}:
         return None
+    if immediate_client_error_statuses is None:
+        return None
 
     return CapturePolicy(
         preset=preset,
@@ -133,7 +141,23 @@ def _parse_capture_policy(payload: object) -> CapturePolicy | None:
         capture_request_events=capture_request_events,
         capture_breadcrumbs=capture_breadcrumbs,
         capture_probe_events=capture_probe_events,
+        immediate_client_error_statuses=immediate_client_error_statuses,
     )
+
+
+def _parse_immediate_client_error_statuses(value: object) -> tuple[int, ...] | None:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > 12:
+        return None
+
+    statuses: list[int] = []
+    for item in value:
+        if not isinstance(item, int) or isinstance(item, bool) or item < 400 or item > 499:
+            return None
+        statuses.append(item)
+
+    return tuple(sorted(set(statuses)))
 
 
 def _parse_directive(payload: object) -> RemoteProbeDirective | None:

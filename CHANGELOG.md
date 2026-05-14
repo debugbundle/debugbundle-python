@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Remote capture-policy parsing now honors `immediate_client_error_statuses` so configured `4xx` responses are emitted as immediate `request_event` incident signals even when generic request capture is disabled.
+
 ## [0.1.2] - 2026-05-12
 
 ### Added

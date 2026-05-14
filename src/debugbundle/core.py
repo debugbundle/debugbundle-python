@@ -609,7 +609,11 @@ class DebugBundleSdk:
             candidate = response.get("status_code") or response.get("response_status")
             if isinstance(candidate, int):
                 status_code = candidate
-        if _is_immediate_request_incident_status(status_code, self._capture_policy.preset):
+        if _is_immediate_request_incident_status(
+            status_code,
+            self._capture_policy.preset,
+            self._capture_policy.immediate_client_error_statuses,
+        ):
             return True
         if policy == "off":
             return False
@@ -851,10 +855,16 @@ def _iso_now(time_provider: Callable[[], float]) -> str:
     return datetime.fromtimestamp(time_provider(), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _is_immediate_request_incident_status(status_code: int | None, preset: str) -> bool:
+def _is_immediate_request_incident_status(
+    status_code: int | None,
+    preset: str,
+    immediate_client_error_statuses: tuple[int, ...],
+) -> bool:
     if status_code is None:
         return False
     if status_code >= 500:
+        return True
+    if status_code in immediate_client_error_statuses:
         return True
     if preset == "investigative":
         return status_code in INVESTIGATIVE_IMMEDIATE_REQUEST_STATUSES
