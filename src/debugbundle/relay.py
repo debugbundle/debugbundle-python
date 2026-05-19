@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+from .relay_delivery import (
+    AtomicRelayFileTransport,
+    RelayForwardTransport,
+    mark_spool_file_delivered,
+    resolve_default_local_events_dir,
+    resolve_default_relay_spool_dir,
+)
 
 DEFAULT_MAX_BODY_BYTES = 262_144
 DEFAULT_RATE_LIMIT_PER_MINUTE = 60
@@ -41,12 +49,32 @@ class BrowserRelayHandler:
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE
     on_accept: Callable[[BrowserRelayAcceptedBatch], None] | None = None
+    project_mode: str | None = None
+    project_token: str | None = None
+    endpoint: str | None = None
+    local_events_dir: str | None = None
+    spool_dir: str | None = None
+    durable_write: bool = True
+    service: str | None = None
+    environment: str | None = None
+    forward_transport: Callable[[Mapping[str, object]], object] | None = None
 
     def __post_init__(self) -> None:
         self.allowed_origins = [o for o in self.allowed_origins if o]
         self.max_body_bytes = max(1, self.max_body_bytes)
         self.rate_limit_per_minute = max(1, self.rate_limit_per_minute)
+        normalized_project_mode = (self.project_mode or "").strip().lower()
+        self.project_mode = normalized_project_mode or None
+        if self.project_mode not in {None, "connected", "local-only"}:
+            self.project_mode = None
         self._rate_limit_state: dict[str, list[int]] = {}
+        self._local_transports: dict[str, AtomicRelayFileTransport] = {}
+        self._spool_transports: dict[str, AtomicRelayFileTransport] = {}
+        self._forwarder = (
+            RelayForwardTransport(self.endpoint, self.forward_transport)
+            if self.project_mode == "connected" and self.endpoint is not None
+            else None
+        )
 
     def handle(self, request: dict[str, Any]) -> BrowserRelayResponse:
         method = str(request.get("method", "POST")).upper()
@@ -106,22 +134,29 @@ class BrowserRelayHandler:
                 errors.append(f"batch[{index}]: Unsupported browser relay event type {type_label}.")
                 continue
 
-            sanitized = _sanitize_event(candidate)
+            sanitized = _sanitize_event(candidate, service_override=self.service, environment_override=self.environment)
             if sanitized is None:
                 errors.append(f"batch[{index}]: Invalid browser relay event payload.")
                 continue
 
             accepted_events.append(sanitized)
 
-        if accepted_events and self.on_accept is not None:
-            self.on_accept(
-                BrowserRelayAcceptedBatch(
-                    events=accepted_events,
-                    headers=_strip_sensitive_headers(headers),
-                    ip_address=ip_address,
-                    received_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                )
-            )
+        if accepted_events:
+            try:
+                if not self._deliver_events(accepted_events):
+                    return BrowserRelayResponse(500)
+
+                if self.on_accept is not None:
+                    self.on_accept(
+                        BrowserRelayAcceptedBatch(
+                            events=accepted_events,
+                            headers=_strip_sensitive_headers(headers),
+                            ip_address=ip_address,
+                            received_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        )
+                    )
+            except Exception:
+                return BrowserRelayResponse(500)
 
         if errors:
             return BrowserRelayResponse(
@@ -133,6 +168,54 @@ class BrowserRelayHandler:
             202,
             {"accepted": len(accepted_events), "rejected": 0, "errors": []},
         )
+
+    def _deliver_events(self, accepted_events: list[dict[str, Any]]) -> bool:
+        if self.project_mode is None:
+            return True
+
+        service_name = self.service or str(accepted_events[0]["service"]["name"])
+
+        if self.project_mode == "local-only":
+            local_transport = self._local_transports.get(service_name)
+            if local_transport is None:
+                local_transport = AtomicRelayFileTransport(
+                    self.local_events_dir or resolve_default_local_events_dir(),
+                    service_name,
+                )
+                self._local_transports[service_name] = local_transport
+
+            return local_transport.write(accepted_events).status_code == 202
+
+        if self.project_mode != "connected":
+            return True
+
+        if self.durable_write:
+            spool_transport = self._spool_transports.get(service_name)
+            if spool_transport is None:
+                spool_transport = AtomicRelayFileTransport(
+                    self.spool_dir or resolve_default_relay_spool_dir(),
+                    service_name,
+                )
+                self._spool_transports[service_name] = spool_transport
+
+            spool_write_result = spool_transport.write(accepted_events)
+            if spool_write_result.status_code != 202:
+                return False
+
+            configured, succeeded = self._forward_connected_events(accepted_events)
+            if succeeded and spool_write_result.written_file_path is not None:
+                mark_spool_file_delivered(spool_write_result.written_file_path)
+
+            return True if configured or spool_write_result.written_file_path is not None else False
+
+        configured, succeeded = self._forward_connected_events(accepted_events)
+        return configured and succeeded
+
+    def _forward_connected_events(self, accepted_events: list[dict[str, Any]]) -> tuple[bool, bool]:
+        if self._forwarder is None or not self.project_token:
+            return (False, False)
+
+        return self._forwarder.send(self.project_token, accepted_events)
 
     def _is_origin_allowed(self, headers: dict[str, str]) -> bool:
         origin = _source_origin(headers)
@@ -210,7 +293,11 @@ def _strip_sensitive_headers(headers: dict[str, str]) -> dict[str, str]:
     return sanitized
 
 
-def _sanitize_event(event: dict[str, Any]) -> dict[str, Any] | None:
+def _sanitize_event(
+    event: dict[str, Any],
+    service_override: str | None = None,
+    environment_override: str | None = None,
+) -> dict[str, Any] | None:
     schema_version = event.get("schema_version")
     event_id = event.get("event_id")
     event_type = event.get("event_type")
@@ -239,6 +326,11 @@ def _sanitize_event(event: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(service_name, str) or not service_name or not isinstance(environment, str) or not environment:
         return None
 
+    normalized_service_name = service_override or service_name
+    normalized_environment = environment_override or environment
+    if not normalized_service_name or not normalized_environment:
+        return None
+
     sanitized: dict[str, Any] = {
         "schema_version": schema_version,
         "event_id": event_id,
@@ -247,16 +339,29 @@ def _sanitize_event(event: dict[str, Any]) -> dict[str, Any] | None:
         "sdk_name": BROWSER_SDK_NAME,
         "sdk_version": sdk_version,
         "service": {
-            "name": service_name,
-            "environment": environment,
+            "name": normalized_service_name,
+            "environment": normalized_environment,
         },
         "payload": payload,
     }
 
+    runtime = service.get("runtime")
+    if isinstance(runtime, str) or runtime is None:
+        sanitized["service"]["runtime"] = runtime
+
+    framework = service.get("framework")
+    if isinstance(framework, str) or framework is None:
+        sanitized["service"]["framework"] = framework
+
     correlation = event.get("correlation")
     if isinstance(correlation, dict):
-        trace_id = correlation.get("trace_id")
-        if isinstance(trace_id, str) or trace_id is None:
-            sanitized["correlation"] = {"trace_id": trace_id}
+        normalized_correlation: dict[str, Any] = {}
+        for key in ("request_id", "trace_id", "session_id", "user_id_hash"):
+            value = correlation.get(key)
+            if isinstance(value, str) or value is None:
+                normalized_correlation[key] = value
+
+        if normalized_correlation:
+            sanitized["correlation"] = normalized_correlation
 
     return sanitized

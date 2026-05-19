@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from debugbundle.relay import BrowserRelayAcceptedBatch, BrowserRelayHandler
+
+_RELAY_COMPLIANCE_FIXTURES = json.loads(
+    Path(__file__).with_name("fixtures").joinpath("relay-compliance.json").read_text(encoding="utf-8")
+)
+
+
+def _relay_compliance_fixture(case_id: str) -> dict:
+    for fixture in _RELAY_COMPLIANCE_FIXTURES["cases"]:
+        if fixture["id"] == case_id:
+            return fixture
+    raise AssertionError(f"Missing relay compliance fixture: {case_id}")
 
 
 def _valid_event(event_type: str = "frontend_exception") -> dict:
@@ -38,6 +50,16 @@ def _make_request(
         },
         "body": raw_body,
         "ip_address": ip_address,
+    }
+
+
+def _make_request_from_fixture(request: dict) -> dict:
+    body = request["bodyText"] if "bodyText" in request else json.dumps(request.get("bodyJson", {"batch": []}))
+    return {
+        "method": request.get("method", "POST"),
+        "headers": request.get("headers", {}),
+        "body": body,
+        "ip_address": request.get("ipAddress"),
     }
 
 
@@ -122,32 +144,32 @@ def test_rejects_missing_batch_key() -> None:
 
 
 def test_rejects_unsupported_event_type() -> None:
-    handler = BrowserRelayHandler(allowed_origins=["https://example.com"])
-    bad_event = _valid_event()
-    bad_event["event_type"] = "backend_exception"
-    response = handler.handle(_make_request(body={"batch": [bad_event]}))
-    assert response.status == 400
-    assert response.body["rejected"] == 1
-    assert "backend_exception" in response.body["errors"][0]
+    fixture = _relay_compliance_fixture("mixed-valid-invalid-batch")
+    handler = BrowserRelayHandler(allowed_origins=[fixture["request"]["headers"]["origin"]])
+    response = handler.handle(_make_request_from_fixture(fixture["request"]))
+    assert response.status == fixture["expected"]["status"]
+    assert response.body["accepted"] == fixture["expected"]["accepted"]
+    assert response.body["rejected"] == fixture["expected"]["rejected"]
+    assert response.body["errors"] == fixture["expected"]["errors"]
 
 
 def test_strips_trust_sensitive_fields() -> None:
+    fixture = _relay_compliance_fixture("credential-smuggling-payload")
     accepted: list[BrowserRelayAcceptedBatch] = []
     handler = BrowserRelayHandler(
-        allowed_origins=["https://example.com"],
+        allowed_origins=[fixture["request"]["headers"]["origin"]],
         on_accept=lambda batch: accepted.append(batch),
     )
-    evt = _valid_event()
-    evt["project_token"] = "dbundle_proj_secret"
-    evt["organization_id"] = "org_1234"
-    evt["sdk_name"] = "tampered_sdk_name"
-    response = handler.handle(_make_request(body={"batch": [evt]}))
-    assert response.status == 202
+    response = handler.handle(_make_request_from_fixture(fixture["request"]))
+    assert response.status == fixture["expected"]["status"]
     assert len(accepted) == 1
     sanitized = accepted[0].events[0]
+    assert "authorization" not in accepted[0].headers
+    assert "cookie" not in accepted[0].headers
+    assert "x-api-key" not in accepted[0].headers
     assert "project_token" not in sanitized
     assert "organization_id" not in sanitized
-    assert sanitized["sdk_name"] == "@debugbundle/sdk-browser"
+    assert sanitized == fixture["expectedEventFile"][0]
 
 
 def test_preserves_correlation_trace_id() -> None:
@@ -217,3 +239,88 @@ def test_on_accept_receives_batch_metadata() -> None:
     assert accepted[0].ip_address == "9.8.7.6"
     assert accepted[0].received_at
     assert "authorization" not in accepted[0].headers
+
+
+def test_local_only_mode_writes_relay_event_file(tmp_path: Path) -> None:
+    events_dir = tmp_path / "events"
+    handler = BrowserRelayHandler(
+        allowed_origins=["https://example.com"],
+        project_mode="local-only",
+        local_events_dir=str(events_dir),
+    )
+
+    response = handler.handle(_make_request())
+
+    assert response.status == 202
+    written_files = list(events_dir.glob("*.events.json"))
+    assert len(written_files) == 1
+    assert json.loads(written_files[0].read_text(encoding="utf-8"))[0]["event_type"] == "frontend_exception"
+
+
+def test_connected_durable_mode_marks_spool_file_delivered_after_forward_success(tmp_path: Path) -> None:
+    spool_dir = tmp_path / "spool"
+    forwarded: list[dict[str, object]] = []
+
+    def forward_transport(request: dict[str, object]) -> object:
+        forwarded.append(request)
+        return type("Response", (), {"status_code": 202, "retry_after_ms": None})()
+
+    handler = BrowserRelayHandler(
+        allowed_origins=["https://example.com"],
+        project_mode="connected",
+        project_token="dbundle_proj_test",
+        endpoint="https://api.debugbundle.com/v1/events",
+        spool_dir=str(spool_dir),
+        forward_transport=forward_transport,
+    )
+
+    response = handler.handle(_make_request())
+
+    assert response.status == 202
+    spool_files = list(spool_dir.glob("*.events.json"))
+    assert len(spool_files) == 1
+    assert spool_files[0].with_name(f"{spool_files[0].name}.delivered").exists()
+    assert forwarded
+    forwarded_event = forwarded[0]["events"][0]
+    assert forwarded_event["project_token"] == "dbundle_proj_test"
+
+
+def test_connected_durable_mode_retains_spool_file_when_forwarding_fails(tmp_path: Path) -> None:
+    spool_dir = tmp_path / "spool"
+
+    def forward_transport(_: dict[str, object]) -> object:
+        return type("Response", (), {"status_code": 500, "retry_after_ms": None})()
+
+    handler = BrowserRelayHandler(
+        allowed_origins=["https://example.com"],
+        project_mode="connected",
+        project_token="dbundle_proj_test",
+        endpoint="https://api.debugbundle.com/v1/events",
+        spool_dir=str(spool_dir),
+        forward_transport=forward_transport,
+    )
+
+    response = handler.handle(_make_request())
+
+    assert response.status == 202
+    spool_files = list(spool_dir.glob("*.events.json"))
+    assert len(spool_files) == 1
+    assert not spool_files[0].with_name(f"{spool_files[0].name}.delivered").exists()
+
+
+def test_connected_low_latency_mode_returns_500_when_forwarding_fails() -> None:
+    def forward_transport(_: dict[str, object]) -> object:
+        return type("Response", (), {"status_code": 500, "retry_after_ms": None})()
+
+    handler = BrowserRelayHandler(
+        allowed_origins=["https://example.com"],
+        project_mode="connected",
+        project_token="dbundle_proj_test",
+        endpoint="https://api.debugbundle.com/v1/events",
+        durable_write=False,
+        forward_transport=forward_transport,
+    )
+
+    response = handler.handle(_make_request())
+
+    assert response.status == 500

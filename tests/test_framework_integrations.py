@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -277,3 +278,72 @@ def test_django_relay_view_accepts_valid_batch() -> None:
     assert response.status_code == 202
     assert json.loads(response.content) == {"accepted": 1, "errors": [], "rejected": 0}
     assert accepted and len(accepted[0].events) == 1
+
+
+def test_flask_relay_handler_writes_local_only_event_file(tmp_path: Path) -> None:
+    from flask import Flask
+
+    app = Flask(__name__)
+    create_flask_relay_handler(
+        allowed_origins=["https://example.com"],
+        project_mode="local-only",
+        local_events_dir=str(tmp_path / "events"),
+    )(app)
+
+    client = app.test_client()
+    response = client.post(
+        "/debugbundle/browser",
+        json=_relay_batch(),
+        headers={"Origin": "https://example.com"},
+    )
+
+    assert response.status_code == 202
+    assert len(list((tmp_path / "events").glob("*.events.json"))) == 1
+
+
+def test_fastapi_relay_handler_writes_local_only_event_file(tmp_path: Path) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    create_fastapi_relay_handler(
+        allowed_origins=["https://example.com"],
+        project_mode="local-only",
+        local_events_dir=str(tmp_path / "events"),
+    )(app)
+
+    client = TestClient(app)
+    response = client.post(
+        "/debugbundle/browser",
+        json=_relay_batch(),
+        headers={"Origin": "https://example.com"},
+    )
+
+    assert response.status_code == 202
+    assert len(list((tmp_path / "events").glob("*.events.json"))) == 1
+
+
+def test_django_relay_view_writes_local_only_event_file(tmp_path: Path) -> None:
+    _ensure_django()
+
+    import json
+
+    from django.test import RequestFactory
+
+    factory = RequestFactory()
+    view = create_django_relay_view(
+        allowed_origins=["https://example.com"],
+        project_mode="local-only",
+        local_events_dir=str(tmp_path / "events"),
+    )
+    request = factory.post(
+        "/debugbundle/browser",
+        data=json.dumps(_relay_batch()),
+        content_type="application/json",
+        HTTP_ORIGIN="https://example.com",
+    )
+
+    response = view(request)
+
+    assert response.status_code == 202
+    assert len(list((tmp_path / "events").glob("*.events.json"))) == 1

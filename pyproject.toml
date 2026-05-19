@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "debugbundle-python"
-version = "0.1.5"
+version = "0.1.6"
 description = "DebugBundle SDK for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,7 +44,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://debugbundle.com/docs/sdk-python"
+Homepage = "https://debugbundle.com/docs/sdks/python"
 Repository = "https://github.com/debugbundle/debugbundle-python"
 Issues = "https://github.com/debugbundle/debugbundle-python/issues"
 

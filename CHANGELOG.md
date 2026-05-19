@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-05-19
+
 ### Added
 - Remote capture-policy parsing now honors `immediate_client_error_statuses` so configured `4xx` responses are emitted as immediate `request_event` incident signals even when generic request capture is disabled.
+- Full browser relay delivery parity, including local-only event-file writes, connected durable spool writes, connected cloud forwarding with server-side project credentials, Django/Flask/FastAPI helper coverage, and shared relay compliance fixtures.
 
 ## [0.1.2] - 2026-05-12
 
