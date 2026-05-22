@@ -12,7 +12,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   release:
@@ -111,15 +111,12 @@ jobs:
           python scripts/check_coverage.py coverage.json
 
       - name: Build package artifacts
-        if: steps.published_state.outputs.state == 'none'
         run: python -m build
 
       - name: Validate built metadata
-        if: steps.published_state.outputs.state == 'none'
         run: python -m twine check dist/*
 
       - name: Smoke test built artifacts
-        if: steps.published_state.outputs.state == 'none'
         shell: bash
         run: |
           set -euo pipefail
@@ -137,6 +134,13 @@ jobs:
           PY
         env:
           RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.release_version.outputs.value }}
+          files: dist/*
+          generate_release_notes: true
 
       - name: Ensure PyPI token is configured
         if: steps.published_state.outputs.state == 'none'
