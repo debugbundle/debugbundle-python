@@ -37,3 +37,6 @@ jobs:
 
       - name: Build package
         run: python -m build
+
+      - name: App-driven smoke test
+        run: make smoke

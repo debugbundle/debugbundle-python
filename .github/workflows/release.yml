@@ -113,27 +113,13 @@ jobs:
       - name: Build package artifacts
         run: python -m build
 
-      - name: Validate built metadata
-        run: python -m twine check dist/*
-
-      - name: Smoke test built artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          tmpdir="$(mktemp -d)"
-          python -m venv "$tmpdir/venv"
-          . "$tmpdir/venv/bin/activate"
-          pip install --upgrade pip
-          pip install dist/debugbundle_python-${RELEASE_VERSION}-py3-none-any.whl
-          python - <<'PY'
-          import debugbundle
-
-          assert hasattr(debugbundle, "init")
-          assert hasattr(debugbundle, "capture_exception")
-          PY
+      - name: App-driven smoke test built artifacts
+        run: python smoke/run_app_driven_smoke.py --wheel dist/debugbundle_python-${RELEASE_VERSION}-py3-none-any.whl
         env:
           RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Validate built metadata
+        run: python -m twine check dist/*
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -163,20 +149,6 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Smoke test published package
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          tmpdir="$(mktemp -d)"
-          python -m venv "$tmpdir/venv"
-          . "$tmpdir/venv/bin/activate"
-          pip install --upgrade pip
-          pip install debugbundle-python==${RELEASE_VERSION}
-          python - <<'PY'
-          import debugbundle
-
-          assert hasattr(debugbundle, "init")
-          assert hasattr(debugbundle, "capture_exception")
-          PY
+        run: python smoke/run_app_driven_smoke.py --package debugbundle-python==${RELEASE_VERSION}
         env:
           RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
