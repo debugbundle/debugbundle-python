@@ -53,5 +53,5 @@ def test_release_workflow_covers_python_package_publication() -> None:
     assert 'tags:\n      - "v*"' in workflow
     assert "python -m build" in workflow
     assert "python -m twine check dist/*" in workflow
-    assert "pip install dist/debugbundle_python-" in workflow
+    assert "python smoke/run_app_driven_smoke.py --wheel dist/debugbundle_python-" in workflow
     assert "twine upload dist/*" in workflow
