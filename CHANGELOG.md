@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-05-29
+
+### Fixed
+- Added `OPTIONS /debugbundle/browser` preflight handling plus matching CORS headers for explicitly allowed split-host browser relay traffic across the Django, Flask, and FastAPI relay helpers.
+
 ## [0.1.6] - 2026-05-19
 
 ### Added

@@ -41,7 +41,7 @@ def create_flask_relay_handler(
     def register(app: Any) -> None:
         from flask import Response, request
 
-        @app.route(route_path, methods=["POST"])
+        @app.route(route_path, methods=["POST", "OPTIONS"])
         def debugbundle_browser_relay() -> Response:
             response = handler.handle(
                 {
@@ -58,6 +58,7 @@ def create_flask_relay_handler(
             return Response(
                 body,
                 status=response.status,
+                headers=response.headers,
                 content_type="application/json",
             )
 

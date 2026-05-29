@@ -33,6 +33,7 @@ ACCEPTED_EVENT_TYPES = frozenset(
 class BrowserRelayResponse:
     status: int
     body: dict[str, Any] | None = None
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -78,47 +79,56 @@ class BrowserRelayHandler:
 
     def handle(self, request: dict[str, Any]) -> BrowserRelayResponse:
         method = str(request.get("method", "POST")).upper()
-        if method != "POST":
-            return BrowserRelayResponse(405)
-
         headers = _normalize_headers(request.get("headers") or {})
+        source_origin = _source_origin(headers)
         if not self._is_origin_allowed(headers):
             return BrowserRelayResponse(403)
 
+        response_headers = _cors_headers(source_origin) if source_origin else {}
+
+        def with_headers(response: BrowserRelayResponse) -> BrowserRelayResponse:
+            return BrowserRelayResponse(response.status, response.body, {**response_headers, **response.headers})
+
+        if method == "OPTIONS":
+            return with_headers(BrowserRelayResponse(204))
+
+        if method != "POST":
+            return with_headers(BrowserRelayResponse(405))
+
         if not _is_supported_content_type(headers.get("content-type")):
-            return BrowserRelayResponse(
+            return with_headers(BrowserRelayResponse(
                 400,
                 {"accepted": 0, "rejected": 0, "errors": ["Relay requests must use Content-Type: application/json."]},
-            )
+            ))
 
         body: str = request.get("body", "")
         if len(body.encode("utf-8") if isinstance(body, str) else body) > self.max_body_bytes:
-            return BrowserRelayResponse(413)
+            return with_headers(BrowserRelayResponse(413))
 
         ip_address: str | None = request.get("ipAddress") or request.get("ip_address")
         if self._is_rate_limited(ip_address):
-            return BrowserRelayResponse(429)
+            return with_headers(BrowserRelayResponse(429))
 
         try:
             decoded = json.loads(body)
         except (json.JSONDecodeError, TypeError, ValueError):
-            return BrowserRelayResponse(
+            return with_headers(BrowserRelayResponse(
                 400,
                 {"accepted": 0, "rejected": 0, "errors": ["Relay request body must be valid JSON."]},
-            )
+            ))
 
         if not isinstance(decoded, dict):
-            return BrowserRelayResponse(
+            return with_headers(BrowserRelayResponse(
                 400,
                 {"accepted": 0, "rejected": 0, "errors": ["Relay request body must be valid JSON."]},
-            )
+            ))
 
         batch = decoded.get("batch")
         if not isinstance(batch, list):
-            return BrowserRelayResponse(
+            return with_headers(BrowserRelayResponse(
                 400,
                 {"accepted": 0, "rejected": 0, "errors": ["Relay request body must include a batch array."]},
-            )
+            ))
 
         accepted_events: list[dict[str, Any]] = []
         errors: list[str] = []
@@ -144,7 +154,7 @@ class BrowserRelayHandler:
         if accepted_events:
             try:
                 if not self._deliver_events(accepted_events):
-                    return BrowserRelayResponse(500)
+                    return with_headers(BrowserRelayResponse(500))
 
                 if self.on_accept is not None:
                     self.on_accept(
@@ -156,18 +166,18 @@ class BrowserRelayHandler:
                         )
                     )
             except Exception:
-                return BrowserRelayResponse(500)
+                return with_headers(BrowserRelayResponse(500))
 
         if errors:
-            return BrowserRelayResponse(
+            return with_headers(BrowserRelayResponse(
                 400,
                 {"accepted": len(accepted_events), "rejected": len(errors), "errors": errors},
-            )
+            ))
 
-        return BrowserRelayResponse(
+        return with_headers(BrowserRelayResponse(
             202,
             {"accepted": len(accepted_events), "rejected": 0, "errors": []},
-        )
+        ))
 
     def _deliver_events(self, accepted_events: list[dict[str, Any]]) -> bool:
         if self.project_mode is None:
@@ -259,6 +269,16 @@ def _normalize_headers(headers: dict[str, Any]) -> dict[str, str]:
 
 def _is_supported_content_type(content_type: str | None) -> bool:
     return isinstance(content_type, str) and "application/json" in content_type.lower()
+
+
+def _cors_headers(origin: str) -> dict[str, str]:
+    return {
+        "access-control-allow-origin": origin,
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "content-type",
+        "access-control-max-age": "600",
+        "vary": "Origin",
+    }
 
 
 def _source_origin(headers: dict[str, str]) -> str | None:

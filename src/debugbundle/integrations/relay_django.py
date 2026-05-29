@@ -54,9 +54,14 @@ def create_django_relay_view(
         )
 
         if response.body is not None:
-            return JsonResponse(response.body, status=response.status, safe=False)
+            result = JsonResponse(response.body, status=response.status, safe=False)
+        else:
+            result = JsonResponse({}, status=response.status)
 
-        return JsonResponse({}, status=response.status)
+        for key, value in response.headers.items():
+            result[key] = value
+
+        return result
 
     return view
 

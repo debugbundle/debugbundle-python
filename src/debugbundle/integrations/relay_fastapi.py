@@ -42,7 +42,7 @@ def create_fastapi_relay_handler(
     )
 
     def register(app: Any) -> None:
-        @app.post(route_path)
+        @app.api_route(route_path, methods=["POST", "OPTIONS"])
         async def debugbundle_browser_relay(request: Request) -> Response:
             body = await request.body()
             headers = {str(key): str(value) for key, value in request.headers.items()}
@@ -58,7 +58,7 @@ def create_fastapi_relay_handler(
             )
 
             if response.body is not None:
-                return JSONResponse(content=response.body, status_code=response.status)
-            return Response(status_code=response.status)
+                return JSONResponse(content=response.body, status_code=response.status, headers=response.headers)
+            return Response(status_code=response.status, headers=response.headers)
 
     return register

@@ -78,6 +78,29 @@ def test_rejects_non_post() -> None:
     assert response.status == 405
 
 
+def test_answers_allowed_cross_origin_preflight() -> None:
+    handler = BrowserRelayHandler(allowed_origins=["https://web.example.com"])
+    response = handler.handle(
+        _make_request(
+            body="",
+            method="OPTIONS",
+            origin="https://web.example.com",
+            host="api.example.com",
+        )
+    )
+    assert response.status == 204
+    assert response.headers["access-control-allow-origin"] == "https://web.example.com"
+    assert response.headers["access-control-allow-methods"] == "POST, OPTIONS"
+
+
+def test_adds_cors_headers_to_accepted_cross_origin_posts() -> None:
+    handler = BrowserRelayHandler(allowed_origins=["https://web.example.com"])
+    response = handler.handle(_make_request(origin="https://web.example.com", host="api.example.com"))
+    assert response.status == 202
+    assert response.headers["access-control-allow-origin"] == "https://web.example.com"
+    assert response.headers["vary"] == "Origin"
+
+
 def test_rejects_invalid_origin() -> None:
     handler = BrowserRelayHandler(allowed_origins=["https://allowed.com"])
     response = handler.handle(_make_request(origin="https://attacker.com"))
