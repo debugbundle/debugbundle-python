@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import version
@@ -19,6 +20,8 @@ SERVER_TRACE_ID = "trace-smoke-server"
 SERVER_REQUEST_ID = "req-smoke-server"
 RELAY_TRACE_ID = "trace-smoke-relay"
 RELAY_REQUEST_ID = "req-smoke-relay"
+PUBLISHED_INSTALL_ATTEMPTS = 12
+PUBLISHED_INSTALL_RETRY_SECONDS = 10
 
 
 @dataclass
@@ -79,7 +82,27 @@ def _run_subprocess(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
-def _bootstrap_clean_install(install_target: str, schema_path: Path) -> None:
+def _install_with_retry(command: list[str], retries: int, retry_delay_seconds: int) -> None:
+    attempts = 0
+
+    while True:
+        attempts += 1
+        try:
+            _run_subprocess(command)
+            return
+        except subprocess.CalledProcessError:
+            if attempts >= retries:
+                raise
+
+            print(
+                "Published package not available yet; retrying in "
+                f"{retry_delay_seconds}s (attempt {attempts}/{retries}).",
+                file=sys.stderr,
+            )
+            time.sleep(retry_delay_seconds)
+
+
+def _bootstrap_clean_install(install_target: str, schema_path: Path, *, published_package: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="debugbundle-python-smoke-") as temp_dir:
         temp_path = Path(temp_dir)
         venv_dir = temp_path / "venv"
@@ -87,19 +110,25 @@ def _bootstrap_clean_install(install_target: str, schema_path: Path) -> None:
 
         _run_subprocess([sys.executable, "-m", "venv", str(venv_dir)])
         _run_subprocess([str(python_bin), "-m", "pip", "install", "--upgrade", "pip"])
-        _run_subprocess(
-            [
-                str(python_bin),
-                "-m",
-                "pip",
-                "install",
-                install_target,
-                "django>=5,<6",
-                "fastapi>=0.115,<1",
-                "flask>=3,<4",
-                "jsonschema>=4.23,<5",
-            ]
-        )
+        install_command = [
+            str(python_bin),
+            "-m",
+            "pip",
+            "install",
+            install_target,
+            "django>=5,<6",
+            "fastapi>=0.115,<1",
+            "flask>=3,<4",
+            "jsonschema>=4.23,<5",
+        ]
+        if published_package:
+            _install_with_retry(
+                install_command,
+                retries=PUBLISHED_INSTALL_ATTEMPTS,
+                retry_delay_seconds=PUBLISHED_INSTALL_RETRY_SECONDS,
+            )
+        else:
+            _run_subprocess(install_command)
         _run_subprocess(
             [
                 str(python_bin),
@@ -297,10 +326,12 @@ def main() -> None:
         if not wheel_path.is_file():
             raise SystemExit(f"Wheel not found: {wheel_path}")
         install_target = str(wheel_path)
+        published_package = False
     else:
         install_target = args.package or ""
+        published_package = True
 
-    _bootstrap_clean_install(install_target, args.schema.resolve())
+    _bootstrap_clean_install(install_target, args.schema.resolve(), published_package=published_package)
 
 
 if __name__ == "__main__":
