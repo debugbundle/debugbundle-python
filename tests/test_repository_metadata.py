@@ -30,7 +30,7 @@ def test_standalone_changelog_and_security_policy_are_launch_ready() -> None:
     security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
     assert "## [Unreleased]" in changelog
-    assert "## [0.1.0] - 2026-05-07" in changelog
+    assert "## [1.0.0] - 2026-05-31" in changelog
     assert "https://github.com/debugbundle/debugbundle-python/security/advisories/new" in security
 
 

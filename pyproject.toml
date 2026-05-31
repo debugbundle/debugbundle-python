@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "debugbundle-python"
-version = "0.1.9"
+version = "1.0.0"
 description = "DebugBundle SDK for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = "AGPL-3.0-only"
 authors = [{ name = "DebugBundle" }]
 keywords = ["debugbundle", "debugging", "ai-agent", "error-tracking"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Framework :: Django",
   "Framework :: FastAPI",
   "Framework :: Flask",

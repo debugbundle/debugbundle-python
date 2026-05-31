@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-31
+
+### Changed
+- Declared the Python SDK stable at `1.0.0` after release-hardening the public package, browser relay, framework integrations, and registry smoke coverage.
+
 ## [0.1.9] - 2026-05-29
 
 ### Fixed

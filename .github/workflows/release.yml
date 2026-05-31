@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Stable SDK version to publish (for example 0.1.0)
+        description: Stable SDK version to publish (for example 1.0.0)
         required: true
         type: string
   push:
