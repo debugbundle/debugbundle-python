@@ -5,7 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SMOKE_SCRIPT = REPO_ROOT / "smoke" / "run_app_driven_smoke.py"
 SPEC = importlib.util.spec_from_file_location("debugbundle_python_smoke", SMOKE_SCRIPT)
@@ -32,7 +31,11 @@ def test_install_with_retry_retries_until_success(monkeypatch) -> None:
     monkeypatch.setattr(SMOKE, "_run_subprocess", fake_run_subprocess)
     monkeypatch.setattr(SMOKE.time, "sleep", sleeps.append)
 
-    SMOKE._install_with_retry(["python", "-m", "pip", "install", "debugbundle-python==0.1.9"], retries=3, retry_delay_seconds=7)
+    SMOKE._install_with_retry(
+        ["python", "-m", "pip", "install", "debugbundle-python==0.1.9"],
+        retries=3,
+        retry_delay_seconds=7,
+    )
 
     assert len(calls) == 2
     assert sleeps == [7]
@@ -46,7 +49,11 @@ def test_install_with_retry_raises_after_final_attempt(monkeypatch) -> None:
     monkeypatch.setattr(SMOKE.time, "sleep", lambda seconds: None)
 
     try:
-        SMOKE._install_with_retry(["python", "-m", "pip", "install", "debugbundle-python==0.1.9"], retries=2, retry_delay_seconds=1)
+        SMOKE._install_with_retry(
+            ["python", "-m", "pip", "install", "debugbundle-python==0.1.9"],
+            retries=2,
+            retry_delay_seconds=1,
+        )
     except subprocess.CalledProcessError as error:
         assert error.returncode == 1
     else:
