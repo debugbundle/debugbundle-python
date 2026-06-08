@@ -283,7 +283,12 @@ class DebugBundleSdk:
         context: Mapping[str, object] | None = None,
     ) -> None:
         with self._lock:
-            if not self._enabled or not self._passes_sample_rate() or not self._should_capture_request_event(request, response):
+            should_capture = (
+                self._enabled
+                and self._passes_sample_rate()
+                and self._should_capture_request_event(request, response)
+            )
+            if not should_capture:
                 return
             payload = _request_event_payload(
                 _redact_mapping(dict(request), self._redact_fields),
@@ -599,7 +604,11 @@ class DebugBundleSdk:
         policy_threshold = self._capture_policy.capture_logs
         return self._log_level if LEVEL_RANKS[self._log_level] >= LEVEL_RANKS[policy_threshold] else policy_threshold
 
-    def _should_capture_request_event(self, request: Mapping[str, object] | None, response: Mapping[str, object] | None) -> bool:
+    def _should_capture_request_event(
+        self,
+        request: Mapping[str, object] | None,
+        response: Mapping[str, object] | None,
+    ) -> bool:
         policy = self._capture_policy.capture_request_events
         status_code = None
         if response is not None:

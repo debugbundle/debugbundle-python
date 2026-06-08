@@ -206,7 +206,13 @@ def _parse_immediate_client_error_path_rules(value: object) -> tuple[ImmediateCl
                 return None
             if method not in methods:
                 methods.append(method)
-        rules.append(ImmediateClientErrorPathRule(status_code=status_code, path_pattern=path_pattern, methods=tuple(methods)))
+        rules.append(
+            ImmediateClientErrorPathRule(
+                status_code=status_code,
+                path_pattern=path_pattern,
+                methods=tuple(methods),
+            )
+        )
 
     return tuple(rules)
 
