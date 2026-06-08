@@ -7,6 +7,13 @@ DEFAULT_PROBES_POLL_INTERVAL_MS = 60_000
 
 
 @dataclass(frozen=True)
+class ImmediateClientErrorPathRule:
+    status_code: int
+    path_pattern: str
+    methods: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CapturePolicy:
     preset: str
     capture_logs: str
@@ -14,6 +21,7 @@ class CapturePolicy:
     capture_breadcrumbs: str
     capture_probe_events: str
     immediate_client_error_statuses: tuple[int, ...]
+    immediate_client_error_path_rules: tuple[ImmediateClientErrorPathRule, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,7 @@ BALANCED_CAPTURE_POLICY = CapturePolicy(
     capture_breadcrumbs="exception_only",
     capture_probe_events="buffer_only",
     immediate_client_error_statuses=(),
+    immediate_client_error_path_rules=(),
 )
 
 MINIMAL_CAPTURE_POLICY = CapturePolicy(
@@ -51,6 +60,7 @@ MINIMAL_CAPTURE_POLICY = CapturePolicy(
     capture_breadcrumbs="local_only",
     capture_probe_events="buffer_only",
     immediate_client_error_statuses=(),
+    immediate_client_error_path_rules=(),
 )
 
 
@@ -123,6 +133,9 @@ def _parse_capture_policy(payload: object) -> CapturePolicy | None:
     immediate_client_error_statuses = _parse_immediate_client_error_statuses(
         payload.get("immediate_client_error_statuses")
     )
+    immediate_client_error_path_rules = _parse_immediate_client_error_path_rules(
+        payload.get("immediate_client_error_path_rules")
+    )
 
     if capture_logs not in {"off", "error", "warning", "info"}:
         return None
@@ -132,7 +145,7 @@ def _parse_capture_policy(payload: object) -> CapturePolicy | None:
         return None
     if capture_probe_events not in {"buffer_only", "standalone_when_activated"}:
         return None
-    if immediate_client_error_statuses is None:
+    if immediate_client_error_statuses is None or immediate_client_error_path_rules is None:
         return None
 
     return CapturePolicy(
@@ -142,6 +155,7 @@ def _parse_capture_policy(payload: object) -> CapturePolicy | None:
         capture_breadcrumbs=capture_breadcrumbs,
         capture_probe_events=capture_probe_events,
         immediate_client_error_statuses=immediate_client_error_statuses,
+        immediate_client_error_path_rules=immediate_client_error_path_rules,
     )
 
 
@@ -158,6 +172,50 @@ def _parse_immediate_client_error_statuses(value: object) -> tuple[int, ...] | N
         statuses.append(item)
 
     return tuple(sorted(set(statuses)))
+
+
+def _parse_immediate_client_error_path_rules(value: object) -> tuple[ImmediateClientErrorPathRule, ...] | None:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > 25:
+        return None
+
+    rules: list[ImmediateClientErrorPathRule] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        status_code = item.get("status_code")
+        path_pattern = item.get("path_pattern")
+        raw_methods = item.get("methods", [])
+        if (
+            not isinstance(status_code, int)
+            or isinstance(status_code, bool)
+            or status_code < 400
+            or status_code > 499
+            or not isinstance(path_pattern, str)
+            or not _is_valid_path_pattern(path_pattern)
+            or not isinstance(raw_methods, list)
+            or len(raw_methods) > 7
+        ):
+            return None
+
+        methods: list[str] = []
+        for raw_method in raw_methods:
+            method = raw_method.upper() if isinstance(raw_method, str) else ""
+            if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+                return None
+            if method not in methods:
+                methods.append(method)
+        rules.append(ImmediateClientErrorPathRule(status_code=status_code, path_pattern=path_pattern, methods=tuple(methods)))
+
+    return tuple(rules)
+
+
+def _is_valid_path_pattern(value: str) -> bool:
+    if not value.startswith("/") or len(value) == 0 or len(value) > 256 or "?" in value or "#" in value:
+        return False
+    wildcard_index = value.find("*")
+    return wildcard_index == -1 or wildcard_index == len(value) - 1
 
 
 def _parse_directive(payload: object) -> RemoteProbeDirective | None:

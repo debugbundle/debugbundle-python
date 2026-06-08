@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-08
+
+### Added
+- Added path-scoped immediate client-error incident promotion support in remote capture-policy parsing so explicitly configured `4xx` routes can emit standalone `request_event` incident signals without widening the status globally.
+
+### Changed
+- Unpromoted client-error request telemetry now remains context-only under repeated traffic, while `5xx` handling and explicitly promoted client-error behavior are preserved.
+
 ## [1.0.0] - 2026-05-31
 
 ### Changed

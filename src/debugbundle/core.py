@@ -55,9 +55,6 @@ LEVEL_RANKS = {
 }
 BALANCED_IMMEDIATE_REQUEST_STATUSES = {408, 423, 424, 425, 429}
 INVESTIGATIVE_IMMEDIATE_REQUEST_STATUSES = BALANCED_IMMEDIATE_REQUEST_STATUSES | {409}
-BALANCED_STANDARD_ANOMALY_STATUSES = {401, 403, 404, 409, 422}
-BALANCED_HIGH_VOLUME_ANOMALY_STATUSES = {400, 410}
-INVESTIGATIVE_ANOMALY_STATUSES = BALANCED_STANDARD_ANOMALY_STATUSES | BALANCED_HIGH_VOLUME_ANOMALY_STATUSES
 
 
 @dataclass
@@ -286,7 +283,7 @@ class DebugBundleSdk:
         context: Mapping[str, object] | None = None,
     ) -> None:
         with self._lock:
-            if not self._enabled or not self._passes_sample_rate() or not self._should_capture_request_event(response):
+            if not self._enabled or not self._passes_sample_rate() or not self._should_capture_request_event(request, response):
                 return
             payload = _request_event_payload(
                 _redact_mapping(dict(request), self._redact_fields),
@@ -602,17 +599,27 @@ class DebugBundleSdk:
         policy_threshold = self._capture_policy.capture_logs
         return self._log_level if LEVEL_RANKS[self._log_level] >= LEVEL_RANKS[policy_threshold] else policy_threshold
 
-    def _should_capture_request_event(self, response: Mapping[str, object] | None) -> bool:
+    def _should_capture_request_event(self, request: Mapping[str, object] | None, response: Mapping[str, object] | None) -> bool:
         policy = self._capture_policy.capture_request_events
         status_code = None
         if response is not None:
             candidate = response.get("status_code") or response.get("response_status")
             if isinstance(candidate, int):
                 status_code = candidate
+        request_path = None
+        http_method = None
+        if request is not None:
+            path_candidate = request.get("path") or request.get("url")
+            method_candidate = request.get("method")
+            request_path = path_candidate if isinstance(path_candidate, str) else None
+            http_method = method_candidate if isinstance(method_candidate, str) else None
         if _is_immediate_request_incident_status(
             status_code,
             self._capture_policy.preset,
             self._capture_policy.immediate_client_error_statuses,
+            request_path,
+            http_method,
+            self._capture_policy.immediate_client_error_path_rules,
         ):
             return True
         if policy == "off":
@@ -624,7 +631,7 @@ class DebugBundleSdk:
         if status_code is None:
             return policy == "filtered"
         if policy == "failures_only":
-            return _is_request_anomaly_candidate_status(status_code, self._capture_policy.preset)
+            return status_code >= 500
         if policy == "filtered":
             return False
         return True
@@ -859,12 +866,22 @@ def _is_immediate_request_incident_status(
     status_code: int | None,
     preset: str,
     immediate_client_error_statuses: tuple[int, ...],
+    request_path: str | None = None,
+    http_method: str | None = None,
+    immediate_client_error_path_rules: tuple[object, ...] = (),
 ) -> bool:
     if status_code is None:
         return False
     if status_code >= 500:
         return True
     if status_code in immediate_client_error_statuses:
+        return True
+    if _matches_immediate_client_error_path_rule(
+        status_code,
+        request_path,
+        http_method,
+        immediate_client_error_path_rules,
+    ):
         return True
     if preset == "investigative":
         return status_code in INVESTIGATIVE_IMMEDIATE_REQUEST_STATUSES
@@ -873,14 +890,39 @@ def _is_immediate_request_incident_status(
     return False
 
 
-def _is_request_anomaly_candidate_status(status_code: int | None, preset: str) -> bool:
-    if status_code is None or status_code < 400 or status_code >= 500:
+def _matches_immediate_client_error_path_rule(
+    status_code: int,
+    request_path: str | None,
+    http_method: str | None,
+    rules: tuple[object, ...],
+) -> bool:
+    if status_code < 400 or status_code > 499 or request_path is None:
         return False
-    if preset == "investigative":
-        return status_code in INVESTIGATIVE_ANOMALY_STATUSES
-    if preset == "balanced":
-        return status_code in BALANCED_STANDARD_ANOMALY_STATUSES or status_code in BALANCED_HIGH_VOLUME_ANOMALY_STATUSES
+    normalized_path = _normalize_request_path(request_path)
+    normalized_method = http_method.upper() if isinstance(http_method, str) else None
+    for rule in rules:
+        rule_status = getattr(rule, "status_code", None)
+        path_pattern = getattr(rule, "path_pattern", None)
+        methods = getattr(rule, "methods", ())
+        if rule_status != status_code or not isinstance(path_pattern, str):
+            continue
+        if methods and (normalized_method is None or normalized_method not in methods):
+            continue
+        if path_pattern.endswith("*"):
+            if normalized_path.startswith(path_pattern[:-1]):
+                return True
+        elif normalized_path == path_pattern:
+            return True
     return False
+
+
+def _normalize_request_path(value: str) -> str:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(value)
+    if parsed.path:
+        return parsed.path
+    return value.split("?", 1)[0].split("#", 1)[0] if value.startswith("/") else "/"
 
 
 def _time_now() -> float:
@@ -891,7 +933,7 @@ def _sdk_version() -> str:
     try:
         return metadata.version("debugbundle-python")
     except metadata.PackageNotFoundError:
-        return "1.0.0"
+        return "1.1.0"
 
 
 def _sdk_config_endpoint(events_endpoint: str) -> str:

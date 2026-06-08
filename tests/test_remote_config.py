@@ -229,7 +229,7 @@ def test_capture_policy_filters_logs_and_request_events_from_remote_config() -> 
     assert events[1]["payload"]["response_status"] == 503
 
 
-def test_balanced_capture_policy_keeps_request_failure_anomaly_candidates() -> None:
+def test_balanced_capture_policy_keeps_immediate_failures_but_not_unconfigured_4xx() -> None:
     clock = ManualClock()
     fetch = FakeFetch(
         responses=[
@@ -271,7 +271,53 @@ def test_balanced_capture_policy_keeps_request_failure_anomaly_candidates() -> N
         for event in events
         if event["event_type"] == "request_event"
     ]
-    assert request_statuses == [429, 404, 409]
+    assert request_statuses == [429]
+
+
+def test_capture_policy_promotes_configured_client_error_path_rules_when_request_capture_is_off() -> None:
+    clock = ManualClock()
+    fetch = FakeFetch(
+        responses=[
+            FakeConfigResponse(
+                200,
+                {
+                    "probes_enabled": True,
+                    "remote_probes_enabled": True,
+                    "active_probes": [],
+                    "poll_interval_ms": 15000,
+                    "capture_policy": {
+                        "preset": "minimal",
+                        "capture_logs": "error",
+                        "capture_request_events": "off",
+                        "capture_breadcrumbs": "local_only",
+                        "capture_probe_events": "buffer_only",
+                        "immediate_client_error_path_rules": [
+                            {"status_code": 404, "path_pattern": "/checkout/*", "methods": ["POST"]}
+                        ],
+                    },
+                },
+            )
+        ]
+    )
+    transport = FakeTransport()
+    sdk = DebugBundleSdk(transport=transport, time_provider=clock.time)
+    sdk.init(
+        project_token="dbundle_proj_test",
+        service="checkout-api",
+        environment="production",
+        fetch_impl=fetch,
+    )
+
+    sdk.capture_request({"method": "POST", "path": "/checkout/cart", "headers": {}}, {"status_code": 404})
+    sdk.capture_request({"method": "GET", "path": "/checkout/cart", "headers": {}}, {"status_code": 404})
+    sdk.capture_request({"method": "POST", "path": "/robots.txt", "headers": {}}, {"status_code": 404})
+    sdk.flush()
+
+    events = _events(transport)
+    request_events = [event for event in events if event["event_type"] == "request_event"]
+    assert len(request_events) == 1
+    assert request_events[0]["payload"]["path"] == "/checkout/cart"
+    assert request_events[0]["payload"]["response_status"] == 404
 
 
 def test_investigative_capture_policy_promotes_409_even_when_request_capture_is_off() -> None:

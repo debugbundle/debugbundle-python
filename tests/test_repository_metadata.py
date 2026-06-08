@@ -30,14 +30,14 @@ def test_standalone_changelog_and_security_policy_are_launch_ready() -> None:
     security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
     assert "## [Unreleased]" in changelog
-    assert "## [1.0.0] - 2026-05-31" in changelog
+    assert "## [1.1.0] - 2026-06-08" in changelog
     assert "https://github.com/debugbundle/debugbundle-python/security/advisories/new" in security
 
 
 def test_standalone_ci_workflow_covers_python_sdk_checks() -> None:
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
-    assert "actions/setup-python@v5" in workflow
+    assert "actions/setup-python@v6" in workflow
     assert 'python-version: "3.12"' in workflow
     assert "python -m pip install -e .[dev]" in workflow
     assert "ruff check src tests" in workflow
