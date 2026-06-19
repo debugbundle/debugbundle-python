@@ -30,12 +30,18 @@ def test_standalone_changelog_and_security_policy_are_launch_ready() -> None:
     security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
     assert "## [Unreleased]" in changelog
-    assert """## [1.1.1] - 2026-06-19
-
-### Fixed
-- Normalized canonical event-envelope emission so custom app context now stays in envelope `context`, request events avoid legacy payload extras, and installed projects stop tripping malformed ingestion rejects after upgrade.
-
-## [1.1.0] - 2026-06-08""" in changelog
+    assert (
+        "## [1.1.2] - 2026-06-19\n\n"
+        "### Fixed\n"
+        "- Release packaging quality gates so the published Python SDK patch can ship cleanly "
+        "without changing runtime behavior.\n\n"
+        "## [1.1.1] - 2026-06-19\n\n"
+        "### Fixed\n"
+        "- Normalized canonical event-envelope emission so custom app context now stays in envelope `context`, "
+        "request events avoid legacy payload extras, and installed projects stop tripping malformed ingestion rejects "
+        "after upgrade.\n\n"
+        "## [1.1.0] - 2026-06-08" in changelog
+    )
     assert "https://github.com/debugbundle/debugbundle-python/security/advisories/new" in security
 
 

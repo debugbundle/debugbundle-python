@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-06-19
+
+### Fixed
+- Release packaging quality gates so the published Python SDK patch can ship cleanly without changing runtime behavior.
+
 ## [1.1.1] - 2026-06-19
 
 ### Fixed
