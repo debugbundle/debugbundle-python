@@ -528,23 +528,27 @@ class DebugBundleSdk:
         payload: dict[str, object],
         context: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
-        return {
+        merged_context = self._merged_context(context)
+        event: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "event_id": str(uuid.uuid4()),
             "event_type": event_type,
             "occurred_at": _iso_now(self._time_provider),
             "sdk_name": "debugbundle-python",
             "sdk_version": _sdk_version(),
-            "sdk_language": "python",
             "service": {
                 "name": self._service,
                 "runtime": "python",
                 "framework": None,
                 "environment": self._environment,
             },
-            "correlation": _correlation_payload(self._merged_context(context)),
+            "correlation": _correlation_payload(merged_context),
             "payload": payload,
         }
+        envelope_context = _event_context(merged_context)
+        if envelope_context:
+            event["context"] = envelope_context
+        return event
 
     def _merged_context(self, context: Mapping[str, object] | None = None) -> dict[str, object]:
         merged = dict(self._context)
@@ -861,6 +865,14 @@ def _correlation_payload(context: Mapping[str, object]) -> dict[str, str | None]
     }
 
 
+def _event_context(context: Mapping[str, object]) -> dict[str, object]:
+    return {
+        str(key): value
+        for key, value in context.items()
+        if key not in {"request", "response", "correlation", "request_id", "trace_id", "session_id", "user_id_hash"}
+    }
+
+
 def _coerce_optional_string(value: object) -> str | None:
     if value is None:
         return None
@@ -942,7 +954,7 @@ def _sdk_version() -> str:
     try:
         return metadata.version("debugbundle-python")
     except metadata.PackageNotFoundError:
-        return "1.1.0"
+        return "1.1.1"
 
 
 def _sdk_config_endpoint(events_endpoint: str) -> str:
