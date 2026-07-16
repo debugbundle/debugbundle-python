@@ -25,6 +25,7 @@ ACCEPTED_EVENT_TYPES = frozenset(
         "frontend_breadcrumb",
         "request_event",
         "probe_event",
+        "analytics_event",
     }
 )
 
@@ -376,8 +377,15 @@ def _sanitize_event(
     correlation = event.get("correlation")
     if isinstance(correlation, dict):
         normalized_correlation: dict[str, Any] = {}
-        for key in ("request_id", "trace_id", "session_id", "user_id_hash"):
-            value = correlation.get(key)
+        correlation_keys = (
+            ("session_id", "visitor_id_hash", "user_id_hash", "trace_id", "deploy_id")
+            if event_type == "analytics_event"
+            else ("request_id", "trace_id", "session_id", "user_id_hash")
+        )
+        for key in correlation_keys:
+            if key not in correlation:
+                continue
+            value = correlation[key]
             if isinstance(value, str) or value is None:
                 normalized_correlation[key] = value
 

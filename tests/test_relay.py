@@ -72,6 +72,21 @@ def test_accepts_valid_batch() -> None:
     assert response.body["rejected"] == 0
 
 
+def test_accepts_analytics_events_and_preserves_analytics_correlation() -> None:
+    fixture = _relay_compliance_fixture("valid-analytics-event")
+    accepted: list[BrowserRelayAcceptedBatch] = []
+    handler = BrowserRelayHandler(
+        allowed_origins=[fixture["request"]["headers"]["origin"]],
+        on_accept=lambda batch: accepted.append(batch),
+    )
+
+    response = handler.handle(_make_request_from_fixture(fixture["request"]))
+
+    assert response.status == 202
+    assert accepted[0].events[0] == fixture["expectedEventFile"][0]
+    assert "project_token" not in accepted[0].events[0]
+
+
 def test_rejects_non_post() -> None:
     handler = BrowserRelayHandler(allowed_origins=["https://example.com"])
     response = handler.handle(_make_request(method="GET"))
@@ -211,7 +226,15 @@ def test_preserves_correlation_trace_id() -> None:
 
 def test_accepts_all_supported_event_types() -> None:
     handler = BrowserRelayHandler(allowed_origins=["https://example.com"])
-    for event_type in ("frontend_exception", "error_suppressed", "frontend_breadcrumb", "request_event", "probe_event"):
+    supported_event_types = (
+        "frontend_exception",
+        "error_suppressed",
+        "frontend_breadcrumb",
+        "request_event",
+        "probe_event",
+        "analytics_event",
+    )
+    for event_type in supported_event_types:
         evt = _valid_event(event_type)
         response = handler.handle(
             _make_request(body={"batch": [evt]}, ip_address=f"10.0.0.{hash(event_type) % 254 + 1}")
