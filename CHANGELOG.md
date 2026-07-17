@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-07-17
+
+### Added
+- Added browser-relay support for `analytics_event` envelopes, preserving only the analytics correlation fields needed for aggregation while continuing to strip browser-supplied credentials.
+
 ## [1.1.2] - 2026-06-19
 
 ### Fixed
