@@ -31,6 +31,11 @@ def test_standalone_changelog_and_security_policy_are_launch_ready() -> None:
 
     assert "## [Unreleased]" in changelog
     assert (
+        "## [1.2.0] - 2026-07-17\n\n"
+        "### Added\n"
+        "- Corrected the semantic release line for browser-relay analytics support. Relay handlers accept "
+        "credential-free `analytics_event` envelopes while preserving only the required analytics correlation "
+        "fields and stripping browser-supplied credentials.\n\n"
         "## [1.1.3] - 2026-07-17\n\n"
         "### Added\n"
         "- Added browser-relay support for `analytics_event` envelopes, preserving only the "

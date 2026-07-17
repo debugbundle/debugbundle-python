@@ -32,7 +32,7 @@ def test_install_with_retry_retries_until_success(monkeypatch) -> None:
     monkeypatch.setattr(SMOKE.time, "sleep", sleeps.append)
 
     SMOKE._install_with_retry(
-        ["python", "-m", "pip", "install", "debugbundle-python==1.1.3"],
+        ["python", "-m", "pip", "install", "debugbundle-python==1.2.0"],
         retries=3,
         retry_delay_seconds=7,
     )
@@ -50,7 +50,7 @@ def test_install_with_retry_raises_after_final_attempt(monkeypatch) -> None:
 
     try:
         SMOKE._install_with_retry(
-            ["python", "-m", "pip", "install", "debugbundle-python==1.1.3"],
+            ["python", "-m", "pip", "install", "debugbundle-python==1.2.0"],
             retries=2,
             retry_delay_seconds=1,
         )
