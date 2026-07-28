@@ -11,6 +11,7 @@ import httpx
 class TransportResponse:
     status_code: int
     retry_after_ms: int | None = None
+    body: object | None = None
 
 
 class Transport(Protocol):
@@ -41,7 +42,11 @@ class HttpTransport:
             except ValueError:
                 retry_after_ms = None
 
-        return TransportResponse(status_code=response.status_code, retry_after_ms=retry_after_ms)
+        try:
+            body: object | None = response.json()
+        except (ValueError, TypeError):
+            body = None
+        return TransportResponse(status_code=response.status_code, retry_after_ms=retry_after_ms, body=body)
 
     def close(self) -> None:
         self._client.close()
@@ -53,7 +58,8 @@ def coerce_transport_response(response: Any) -> TransportResponse:
 
     status_code = getattr(response, "status_code", None)
     retry_after_ms = getattr(response, "retry_after_ms", None)
+    body = getattr(response, "body", None)
     if isinstance(status_code, int):
-        return TransportResponse(status_code=status_code, retry_after_ms=retry_after_ms)
+        return TransportResponse(status_code=status_code, retry_after_ms=retry_after_ms, body=body)
 
     raise TypeError("Unsupported transport response")

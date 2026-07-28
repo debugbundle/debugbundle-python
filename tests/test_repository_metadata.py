@@ -31,6 +31,17 @@ def test_standalone_changelog_and_security_policy_are_launch_ready() -> None:
 
     assert "## [Unreleased]" in changelog
     assert (
+        "## [1.3.0] - 2026-07-28\n\n"
+        "### Added\n"
+        "\n"
+        "- Added the universal `before_send` event hook and canonical object wrapping for scalar/list probe values.\n\n"
+        "### Fixed\n"
+        "\n"
+        "- Reconcile connected ingestion acknowledgements per event, retaining only retryable rejections and "
+        "withholding delivery health when no event was accepted.\n\n"
+        "### Changed\n"
+        "\n"
+        "- Verify the supported Python 3.10, 3.11, and 3.12 runtime lanes in CI.\n\n"
         "## [1.2.0] - 2026-07-17\n\n"
         "### Added\n"
         "- Corrected the semantic release line for browser-relay analytics support. Relay handlers accept "
@@ -59,7 +70,8 @@ def test_standalone_ci_workflow_covers_python_sdk_checks() -> None:
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert "actions/setup-python@v6" in workflow
-    assert 'python-version: "3.12"' in workflow
+    assert 'python-version: ["3.10", "3.11", "3.12"]' in workflow
+    assert "python-version: ${{ matrix.python-version }}" in workflow
     assert "python -m pip install -e .[dev]" in workflow
     assert "ruff check src tests" in workflow
     assert "mypy src" in workflow

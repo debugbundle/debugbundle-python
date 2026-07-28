@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from contextvars import Token
 from typing import Any
 
+from .before_send import BeforeSendHook
 from .config import RemoteProbeDirective
 from .core import ConfigFetchResponse, DebugBundleSdk
 from .relay import BrowserRelayAcceptedBatch, BrowserRelayHandler, BrowserRelayResponse
@@ -30,6 +31,7 @@ def init(
     probe_flush_on_error: bool = True,
     fetch_impl: Callable[[str, dict[str, object]], ConfigFetchResponse] | None = None,
     on_diagnostic: Callable[[dict[str, object]], None] | None = None,
+    before_send: BeforeSendHook | None = None,
     probes_poll_interval: int = 60_000,
 ) -> None:
     _sdk.init(
@@ -48,6 +50,7 @@ def init(
         probe_flush_on_error=probe_flush_on_error,
         fetch_impl=fetch_impl,
         on_diagnostic=on_diagnostic,
+        before_send=before_send,
         probes_poll_interval=probes_poll_interval,
     )
 

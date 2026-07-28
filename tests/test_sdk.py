@@ -13,6 +13,7 @@ from debugbundle.core import DebugBundleSdk
 class FakeResponse:
     status_code: int
     retry_after_ms: int | None = None
+    body: object | None = None
 
 
 class FakeTransport:
@@ -68,6 +69,81 @@ def test_invalid_config_degrades_silently() -> None:
     assert transport.calls == []
 
 
+def test_before_send_mutates_after_redaction_and_before_queueing() -> None:
+    transport = FakeTransport()
+    observed_passwords: list[object] = []
+
+    def before_send(event: dict[str, object]) -> dict[str, object]:
+        context = event.get("context")
+        assert isinstance(context, dict)
+        observed_passwords.append(context["password"])
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        payload["message"] = "mutated"
+        return event
+
+    sdk = DebugBundleSdk(transport=transport)
+    sdk.init(project_token="dbundle_proj_test", before_send=before_send)
+    sdk.capture_message("original", level="error", context={"password": "secret"})
+    sdk.flush()
+
+    assert observed_passwords == ["[REDACTED]"]
+    events = transport.calls[0]["events"]
+    assert isinstance(events, list)
+    assert events[0]["payload"]["message"] == "mutated"
+
+
+def test_before_send_drop_invalid_failure_and_sampling_are_safe() -> None:
+    transport = FakeTransport()
+    diagnostics: list[dict[str, object]] = []
+    calls: list[str] = []
+
+    def dropping_hook(event: dict[str, object]) -> None:
+        calls.append(str(event["event_id"]))
+        return None
+
+    sdk = DebugBundleSdk(transport=transport)
+    sdk.init(project_token="dbundle_proj_test", before_send=dropping_hook)
+    sdk.capture_message("drop", level="error")
+    sdk.flush()
+    assert len(calls) == 1
+    assert transport.calls == []
+
+    sdk.init(
+        project_token="dbundle_proj_test",
+        before_send=lambda _event: {"invalid": True},
+        on_diagnostic=diagnostics.append,
+    )
+    sdk.capture_message("preserve invalid", level="error")
+    sdk.flush()
+    events = transport.calls[0]["events"]
+    assert isinstance(events, list)
+    assert events[0]["payload"]["message"] == "preserve invalid"
+    assert diagnostics[-1]["code"] == "before_send_invalid_event"
+
+    def failing_hook(_event: dict[str, object]) -> dict[str, object]:
+        raise RuntimeError("hook failed")
+
+    sdk.init(project_token="dbundle_proj_test", before_send=failing_hook, on_diagnostic=diagnostics.append)
+    sdk.capture_message("preserve failure", level="error")
+    sdk.flush()
+    events = transport.calls[1]["events"]
+    assert isinstance(events, list)
+    assert events[0]["payload"]["message"] == "preserve failure"
+    assert diagnostics[-1]["code"] == "before_send_failed"
+
+    sampled_calls: list[str] = []
+    sdk.init(
+        project_token="dbundle_proj_test",
+        sample_rate=0,
+        before_send=lambda event: sampled_calls.append(str(event["event_id"])) or event,
+    )
+    sdk.capture_message("sampled out", level="error")
+    sdk.flush()
+    assert len(sampled_calls) == 1
+    assert len(transport.calls) == 2
+
+
 def test_retains_buffered_events_when_transport_fails() -> None:
     transport = FakeTransport(responses=[FakeResponse(status_code=500), FakeResponse(status_code=202)])
     sdk = DebugBundleSdk(transport=transport)
@@ -105,6 +181,98 @@ def test_applies_retry_backoff_after_429_response() -> None:
     sdk.flush()
 
     assert len(transport.calls) == 2
+
+
+def test_retries_only_indexed_retryable_ingestion_rejections() -> None:
+    clock = ManualClock()
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=202,
+                retry_after_ms=1000,
+                body={
+                    "accepted": 1,
+                    "rejected": 1,
+                    "errors": [{"index": 1, "reason": "rate_limited"}],
+                },
+            ),
+            FakeResponse(
+                status_code=202,
+                body={"accepted": 1, "rejected": 0, "errors": []},
+            ),
+        ]
+    )
+    sdk = DebugBundleSdk(transport=transport, time_provider=clock.time)
+    sdk.init(project_token="dbundle_proj_test", service="checkout-api", environment="production")
+    sdk.capture_message("accepted", level="error")
+    sdk.capture_message("retry", level="error")
+
+    sdk.flush()
+
+    assert sdk.status == "degraded"
+    assert sdk.last_event_at is not None
+    clock.advance(1.001)
+    sdk.flush()
+    second_events = transport.calls[1]["events"]
+    assert isinstance(second_events, list)
+    assert [event["payload"]["message"] for event in second_events] == ["retry"]
+    assert sdk.status == "healthy"
+
+
+def test_all_terminal_rejections_do_not_advance_delivery_state() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=202,
+                body={
+                    "accepted": 0,
+                    "rejected": 1,
+                    "errors": [{"index": 0, "reason": "capture_policy_rejected"}],
+                },
+            )
+        ]
+    )
+    sdk = DebugBundleSdk(transport=transport)
+    sdk.init(project_token="dbundle_proj_test", service="checkout-api", environment="production")
+    sdk.capture_message("terminal", level="error")
+
+    sdk.flush()
+    sdk.flush()
+
+    assert sdk.status == "disconnected"
+    assert sdk.last_event_at is None
+    assert len(transport.calls) == 1
+
+
+def test_inconsistent_acknowledgement_retains_the_full_batch() -> None:
+    clock = ManualClock()
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=202,
+                retry_after_ms=1000,
+                body={"accepted": 1, "rejected": 0, "errors": []},
+            ),
+            FakeResponse(
+                status_code=202,
+                body={"accepted": 2, "rejected": 0, "errors": []},
+            ),
+        ]
+    )
+    sdk = DebugBundleSdk(transport=transport, time_provider=clock.time)
+    sdk.init(project_token="dbundle_proj_test", service="checkout-api", environment="production")
+    sdk.capture_message("first", level="error")
+    sdk.capture_message("second", level="error")
+
+    sdk.flush()
+    assert sdk.last_event_at is None
+    assert sdk.status == "degraded"
+
+    clock.advance(1.001)
+    sdk.flush()
+    second_events = transport.calls[1]["events"]
+    assert isinstance(second_events, list)
+    assert [event["payload"]["message"] for event in second_events] == ["first", "second"]
 
 
 def test_flushes_when_batch_size_is_reached() -> None:

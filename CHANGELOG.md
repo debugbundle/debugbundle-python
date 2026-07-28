@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-28
+
+### Added
+
+- Added the universal `before_send` event hook and canonical object wrapping for scalar/list probe values.
+
+### Fixed
+
+- Reconcile connected ingestion acknowledgements per event, retaining only retryable rejections and withholding delivery health when no event was accepted.
+
+### Changed
+
+- Verify the supported Python 3.10, 3.11, and 3.12 runtime lanes in CI.
+
 ## [1.2.0] - 2026-07-17
 
 ### Added

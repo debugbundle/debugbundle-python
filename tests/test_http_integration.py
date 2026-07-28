@@ -79,7 +79,9 @@ class MockIngestionServer:
 
 
 def test_sdk_flush_posts_real_http_batch_to_mock_ingestion_server() -> None:
-    server = MockIngestionServer([PlannedResponse(status_code=202, body={"accepted": True})])
+    server = MockIngestionServer(
+        [PlannedResponse(status_code=202, body={"accepted": 2, "rejected": 0, "errors": []})]
+    )
     server.start()
 
     try:

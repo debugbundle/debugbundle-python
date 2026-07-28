@@ -27,6 +27,7 @@ def test_module_init_exposes_contract_friendly_signature() -> None:
         "probe_flush_on_error",
         "fetch_impl",
         "on_diagnostic",
+        "before_send",
         "probes_poll_interval",
     ]
 

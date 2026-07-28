@@ -70,7 +70,10 @@ class MockIngestionServer:
                 self.send_response(202)
                 self.send_header("content-type", "application/json")
                 self.end_headers()
-                self.wfile.write(b'{"accepted": true}')
+                event_count = len(parsed_body.get("events", []))
+                self.wfile.write(
+                    json.dumps({"accepted": event_count, "rejected": 0, "errors": []}).encode("utf-8")
+                )
 
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
                 return

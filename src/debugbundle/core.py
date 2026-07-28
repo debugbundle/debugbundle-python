@@ -2,23 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import platform
-import socket
 import sys
 import threading
-import time
 import traceback
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from importlib import metadata
 from random import random
 from typing import Any, Protocol, cast
 
+from .acknowledgement import decide_acknowledgement
+from .before_send import BeforeSendHook, apply_before_send
 from .config import (
     BALANCED_CAPTURE_POLICY,
     DEFAULT_PROBES_POLL_INTERVAL_MS,
@@ -29,32 +25,35 @@ from .config import (
     find_matching_remote_probe_directives,
     parse_remote_config,
 )
+from .event_support import (
+    DEFAULT_LOG_LEVEL,
+    LEVEL_RANKS,
+    backend_exception_request_payload,
+    backend_exception_response_payload,
+    correlation_payload,
+    event_context,
+    is_immediate_request_incident_status,
+    iso_now,
+    level_enabled,
+    normalize_level,
+    redact_mapping,
+    request_event_payload,
+    runtime_process_facts,
+    sdk_config_endpoint,
+    sdk_version,
+    serialize_error,
+    time_now,
+)
 from .logger_integrations import attach_optional_integrations
 from .redaction import DEFAULT_REDACT_FIELDS, redact_value
 from .suppression import EventSuppressionTracker
 from .transport import HttpTransport, Transport, coerce_transport_response
 from .trigger_token import resolve_request_trigger_directives
 
-try:
-    import resource
-except ImportError:  # pragma: no cover - resource is unavailable on some platforms.
-    resource = None  # type: ignore[assignment]
-
 DEFAULT_BATCH_SIZE = 25
 DEFAULT_FLUSH_INTERVAL = 5.0
 DEFAULT_ENDPOINT = "https://api.debugbundle.com/v1/events"
-DEFAULT_LOG_LEVEL = "warning"
-PROCESS_START_MONOTONIC = time.monotonic()
 SCHEMA_VERSION = "2026-03-01"
-LEVEL_RANKS = {
-    "debug": 10,
-    "info": 20,
-    "warning": 30,
-    "error": 40,
-    "critical": 50,
-}
-BALANCED_IMMEDIATE_REQUEST_STATUSES = {408, 423, 424, 425, 429}
-INVESTIGATIVE_IMMEDIATE_REQUEST_STATUSES = BALANCED_IMMEDIATE_REQUEST_STATUSES | {409}
 
 
 @dataclass
@@ -95,7 +94,7 @@ class DebugBundleSdk:
         time_provider: Callable[[], float] | None = None,
     ) -> None:
         self._transport_override = transport
-        self._time_provider = time_provider or _time_now
+        self._time_provider = time_provider or time_now
         self._lock = threading.RLock()
         self._timer: threading.Timer | None = None
         self._remote_config_timer: threading.Timer | None = None
@@ -130,6 +129,7 @@ class DebugBundleSdk:
         self._async_handlers: dict[asyncio.AbstractEventLoop, Any] = {}
         self._fetch_impl: Callable[[str, dict[str, object]], ConfigFetchResponse] | None = None
         self._on_diagnostic: Callable[[dict[str, object]], None] | None = None
+        self._before_send: BeforeSendHook | None = None
         self._configured_probes_poll_interval_ms = DEFAULT_PROBES_POLL_INTERVAL_MS
         self._remote_config_etag: str | None = None
         self._remote_config_snapshot: RemoteConfigSnapshot | None = None
@@ -172,6 +172,7 @@ class DebugBundleSdk:
         probe_flush_on_error: bool = True,
         fetch_impl: Callable[[str, dict[str, object]], ConfigFetchResponse] | None = None,
         on_diagnostic: Callable[[dict[str, object]], None] | None = None,
+        before_send: BeforeSendHook | None = None,
         probes_poll_interval: int = DEFAULT_PROBES_POLL_INTERVAL_MS,
     ) -> None:
         with self._lock:
@@ -183,7 +184,7 @@ class DebugBundleSdk:
             self._endpoint = endpoint
             self._batch_size = max(1, batch_size)
             self._flush_interval = max(0.1, flush_interval)
-            self._log_level = _normalize_level(log_level)
+            self._log_level = normalize_level(log_level)
             self._sample_rate = min(max(sample_rate, 0.0), 1.0)
             self._redact_fields = set(DEFAULT_REDACT_FIELDS)
             if redact_fields:
@@ -200,6 +201,7 @@ class DebugBundleSdk:
             self._consecutive_failures = 0
             self._fetch_impl = fetch_impl
             self._on_diagnostic = on_diagnostic
+            self._before_send = before_send
             self._configured_probes_poll_interval_ms = max(1, int(probes_poll_interval))
             self._remote_config_etag = None
             self._remote_config_snapshot = None
@@ -222,12 +224,12 @@ class DebugBundleSdk:
         handled: bool = True,
     ) -> None:
         with self._lock:
-            if not self._enabled or not self._passes_sample_rate():
+            if not self._enabled:
                 return
 
-            redacted_context = _redact_mapping(dict(context or {}), self._redact_fields)
-            request_payload = _backend_exception_request_payload(redacted_context.get("request"))
-            response_payload = _backend_exception_response_payload(redacted_context.get("response"))
+            redacted_context = redact_mapping(dict(context or {}), self._redact_fields)
+            request_payload = backend_exception_request_payload(redacted_context.get("request"))
+            response_payload = backend_exception_response_payload(redacted_context.get("response"))
 
             payload: dict[str, object] = {
                 "name": type(error).__name__,
@@ -236,15 +238,23 @@ class DebugBundleSdk:
                 "handled": handled,
                 "request": request_payload,
                 "response": response_payload,
-                "runtime": _runtime_process_facts(),
+                "runtime": runtime_process_facts(),
             }
             if self._probe_flush_on_error:
                 probe_data = self._build_probe_data()
                 if probe_data is not None:
                     payload["probe_data"] = probe_data
 
-            event = self._base_event("backend_exception", payload, context=redacted_context)
-            suppression_key = f"backend_exception:{payload['name']}:{payload['message']}:{payload.get('stack', '')}"
+            event = self._apply_before_send_event(
+                self._base_event("backend_exception", payload, context=redacted_context)
+            )
+            if event is None or not self._passes_sample_rate():
+                return
+            event_payload = cast(dict[str, object], event["payload"])
+            suppression_key = (
+                f"{event['event_type']}:{event_payload.get('name', '')}:"
+                f"{event_payload.get('message', '')}:{event_payload.get('stack', '')}"
+            )
             if not self._suppression.should_capture(suppression_key, self._time_provider()):
                 return
             self._enqueue_event(event)
@@ -258,14 +268,9 @@ class DebugBundleSdk:
         level: str = DEFAULT_LOG_LEVEL,
         context: Mapping[str, object] | None = None,
     ) -> None:
-        normalized_level = _normalize_level(level)
+        normalized_level = normalize_level(level)
         with self._lock:
-            if (
-                not self._enabled
-                or not self._passes_sample_rate()
-                or self._capture_policy.capture_logs == "off"
-                or not _level_enabled(normalized_level, self._effective_log_threshold())
-            ):
+            if not self._enabled:
                 return
             payload: dict[str, object] = {
                 "message": message,
@@ -273,8 +278,16 @@ class DebugBundleSdk:
                 "attributes": {},
             }
             if context:
-                payload["attributes"] = _redact_mapping(dict(context), self._redact_fields)
-            self._enqueue_event(self._base_event("log_event", payload, context=context))
+                payload["attributes"] = redact_mapping(dict(context), self._redact_fields)
+            event = self._apply_before_send_event(self._base_event("log_event", payload, context=context))
+            if (
+                event is None
+                or not self._passes_sample_rate()
+                or self._capture_policy.capture_logs == "off"
+                or not level_enabled(normalized_level, self._effective_log_threshold())
+            ):
+                return
+            self._enqueue_event(event)
 
     def capture_request(
         self,
@@ -283,19 +296,21 @@ class DebugBundleSdk:
         context: Mapping[str, object] | None = None,
     ) -> None:
         with self._lock:
-            should_capture = (
-                self._enabled
-                and self._passes_sample_rate()
-                and self._should_capture_request_event(request, response)
-            )
-            if not should_capture:
+            if not self._enabled:
                 return
-            payload = _request_event_payload(
-                _redact_mapping(dict(request), self._redact_fields),
-                _redact_mapping(dict(response or {}), self._redact_fields),
-                _redact_mapping(dict(context or {}), self._redact_fields),
+            payload = request_event_payload(
+                redact_mapping(dict(request), self._redact_fields),
+                redact_mapping(dict(response or {}), self._redact_fields),
+                redact_mapping(dict(context or {}), self._redact_fields),
             )
-            self._enqueue_event(self._base_event("request_event", payload, context=context))
+            event = self._apply_before_send_event(self._base_event("request_event", payload, context=context))
+            if (
+                event is None
+                or not self._passes_sample_rate()
+                or not self._should_capture_request_event(request, response)
+            ):
+                return
+            self._enqueue_event(event)
 
     def capture_message(
         self,
@@ -307,15 +322,15 @@ class DebugBundleSdk:
 
     def set_context(self, key: str, value: object) -> None:
         with self._lock:
-            self._context[key] = _redact_mapping(value, self._redact_fields)
+            self._context[key] = redact_value({key: value}, self._redact_fields)[key]
 
     def _bind_scoped_context(self, context: Mapping[str, object]) -> Token[dict[str, object] | None]:
         scoped_context = dict(self._scoped_context.get() or {})
         for key, value in context.items():
             if value is None:
                 continue
-            scoped_context[str(key)] = _redact_mapping(value, self._redact_fields)
-        return self._scoped_context.set(scoped_context)
+            scoped_context[str(key)] = value
+        return self._scoped_context.set(cast(dict[str, object], redact_value(scoped_context, self._redact_fields)))
 
     def _reset_scoped_context(self, token: Token[dict[str, object] | None]) -> None:
         self._scoped_context.reset(token)
@@ -333,9 +348,10 @@ class DebugBundleSdk:
             if now < self._retry_after:
                 return
 
+            batch = [dict(event) for event in self._buffer]
             request = {
                 "project_token": self._project_token,
-                "events": [dict(event) for event in self._buffer],
+                "events": batch,
             }
 
             try:
@@ -346,10 +362,48 @@ class DebugBundleSdk:
                 return
 
             if 200 <= response.status_code < 300:
-                self._buffer = []
+                acknowledgement = decide_acknowledgement(response.body, len(batch))
+                if acknowledgement.kind == "protocol_failure":
+                    self._consecutive_failures += 1
+                    retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
+                    self._retry_after = now + (retry_after_ms / 1000)
+                    self._emit_diagnostic(
+                        "ingestion_acknowledgement_invalid",
+                        "sdk-python retained a batch after an invalid ingestion acknowledgement",
+                        metadata={"reason": acknowledgement.reason or "invalid"},
+                    )
+                    self._schedule_flush_locked(delay=retry_after_ms / 1000)
+                    return
+                if acknowledgement.kind == "legacy":
+                    self._buffer = self._buffer[len(batch) :]
+                    self._retry_after = 0.0
+                    self._last_event_at = self._time_provider() * 1000
+                    self._consecutive_failures = 0
+                    return
+
+                trailing_events = self._buffer[len(batch) :]
+                self._buffer = [
+                    batch[index] for index in acknowledgement.retryable_indices if 0 <= index < len(batch)
+                ] + trailing_events
+                if acknowledgement.terminal_errors:
+                    self._emit_diagnostic(
+                        "ingestion_events_rejected",
+                        "sdk-python removed terminally rejected ingestion events",
+                        metadata={
+                            "rejected_count": len(acknowledgement.terminal_errors),
+                            "reasons": sorted({reason for _, reason in acknowledgement.terminal_errors}),
+                        },
+                    )
+                if acknowledgement.accepted > 0:
+                    self._last_event_at = self._time_provider() * 1000
+                if acknowledgement.retryable_indices:
+                    self._consecutive_failures += 1
+                    retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
+                    self._retry_after = now + (retry_after_ms / 1000)
+                    self._schedule_flush_locked(delay=retry_after_ms / 1000)
+                    return
                 self._retry_after = 0.0
-                self._last_event_at = self._time_provider() * 1000
-                self._consecutive_failures = 0
+                self._consecutive_failures = 0 if acknowledgement.accepted > 0 else 3
                 return
 
             self._consecutive_failures += 1
@@ -383,7 +437,7 @@ class DebugBundleSdk:
             if not isinstance(value, Mapping):
                 value = {"value": value}
 
-            redacted_value = _redact_mapping(dict(value), self._redact_fields)
+            redacted_value = redact_mapping(dict(value), self._redact_fields)
 
             if is_heavy:
                 self._emit_probe_events(label, redacted_value, matching_directives)
@@ -392,7 +446,7 @@ class DebugBundleSdk:
             entry = ProbeEntry(
                 label=label,
                 data=redacted_value,
-                timestamp=_iso_now(self._time_provider),
+                timestamp=iso_now(self._time_provider),
             )
             bucket = self._probe_buffers.setdefault(label, deque(maxlen=self._max_probe_entries_per_label))
             bucket.append(entry)
@@ -476,7 +530,7 @@ class DebugBundleSdk:
 
             try:
                 response = self._fetch_impl(
-                    _sdk_config_endpoint(self._endpoint),
+                    sdk_config_endpoint(self._endpoint),
                     {
                         "method": "GET",
                         "headers": request_headers,
@@ -516,7 +570,7 @@ class DebugBundleSdk:
                 self._emit_diagnostic(
                     "remote_probe_config_failed",
                     "sdk-python failed to refresh remote probe config",
-                    metadata={"error": _serialize_error(error)},
+                    metadata={"error": serialize_error(error)},
                 )
                 if initial:
                     self._capture_policy = MINIMAL_CAPTURE_POLICY
@@ -533,19 +587,19 @@ class DebugBundleSdk:
             "schema_version": SCHEMA_VERSION,
             "event_id": str(uuid.uuid4()),
             "event_type": event_type,
-            "occurred_at": _iso_now(self._time_provider),
+            "occurred_at": iso_now(self._time_provider),
             "sdk_name": "debugbundle-python",
-            "sdk_version": _sdk_version(),
+            "sdk_version": sdk_version(),
             "service": {
                 "name": self._service,
                 "runtime": "python",
                 "framework": None,
                 "environment": self._environment,
             },
-            "correlation": _correlation_payload(merged_context),
+            "correlation": correlation_payload(merged_context),
             "payload": payload,
         }
-        envelope_context = _event_context(merged_context)
+        envelope_context = event_context(merged_context)
         if envelope_context:
             event["context"] = envelope_context
         return event
@@ -556,9 +610,8 @@ class DebugBundleSdk:
         if scoped_context is not None:
             merged.update(scoped_context)
         if context is not None:
-            for key, value in context.items():
-                merged[str(key)] = _redact_mapping(value, self._redact_fields)
-        return merged
+            merged.update({str(key): value for key, value in context.items()})
+        return cast(dict[str, object], redact_value(merged, self._redact_fields))
 
     def _enqueue_event(self, event: dict[str, object]) -> None:
         self._buffer.append(event)
@@ -583,7 +636,16 @@ class DebugBundleSdk:
             if not isinstance(event_type, str) or not isinstance(payload, dict):
                 continue
             aggregate.update(self._base_event(event_type, cast(dict[str, object], payload)))
-            self._buffer.append(aggregate)
+            prepared = self._apply_before_send_event(aggregate)
+            if prepared is not None:
+                self._buffer.append(prepared)
+
+    def _apply_before_send_event(self, event: dict[str, object]) -> dict[str, object] | None:
+        return apply_before_send(
+            event,
+            self._before_send,
+            lambda code, message: self._emit_diagnostic(code, message),
+        )
 
     def _build_probe_data(self) -> dict[str, object] | None:
         items: list[dict[str, object]] = []
@@ -626,7 +688,7 @@ class DebugBundleSdk:
             method_candidate = request.get("method")
             request_path = path_candidate if isinstance(path_candidate, str) else None
             http_method = method_candidate if isinstance(method_candidate, str) else None
-        if _is_immediate_request_incident_status(
+        if is_immediate_request_incident_status(
             status_code,
             self._capture_policy.preset,
             self._capture_policy.immediate_client_error_statuses,
@@ -650,8 +712,6 @@ class DebugBundleSdk:
         return True
 
     def _emit_probe_events(self, label: str, data: dict[str, object], directives: list[RemoteProbeDirective]) -> None:
-        if self._capture_policy.capture_probe_events != "standalone_when_activated":
-            return
         for directive in directives:
             payload = {
                 "label": label,
@@ -659,7 +719,9 @@ class DebugBundleSdk:
                 "probe_label_pattern": getattr(directive, "label_pattern"),
                 "data": dict(data),
             }
-            self._enqueue_event(self._base_event("probe_event", payload))
+            event = self._apply_before_send_event(self._base_event("probe_event", payload))
+            if event is not None and self._capture_policy.capture_probe_events == "standalone_when_activated":
+                self._enqueue_event(event)
 
     def begin_request(self, request: dict[str, Any]) -> Token[list[RemoteProbeDirective] | None]:
         trigger_token_key = (
@@ -719,253 +781,7 @@ class DebugBundleSdk:
         diagnostic: dict[str, object] = {"code": code, "message": message}
         if metadata is not None:
             diagnostic["metadata"] = metadata
-        self._on_diagnostic(diagnostic)
-
-
-def _normalize_level(level: str) -> str:
-    normalized = level.lower().strip()
-    return normalized if normalized in LEVEL_RANKS else DEFAULT_LOG_LEVEL
-
-
-def _level_enabled(candidate: str, threshold: str) -> bool:
-    return LEVEL_RANKS[candidate] >= LEVEL_RANKS[threshold]
-
-
-def _redact_mapping(value: object, redact_fields: set[str]) -> Any:
-    if isinstance(value, Mapping):
-        return redact_value(value, redact_fields)
-    return value
-
-
-def _runtime_process_facts() -> dict[str, object]:
-    return {
-        "version": platform.python_version(),
-        "platform": sys.platform,
-        "arch": platform.machine() or None,
-        "pid": os.getpid(),
-        "cwd": _safe_cwd(),
-        "uptime_sec": round(max(0.0, time.monotonic() - PROCESS_START_MONOTONIC), 3),
-        "hostname": _safe_hostname(),
-        "thread_id": threading.get_ident(),
-        "memory": _memory_facts(),
-    }
-
-
-def _safe_cwd() -> str | None:
-    try:
-        return os.getcwd()
-    except OSError:
-        return None
-
-
-def _safe_hostname() -> str | None:
-    try:
-        return socket.gethostname()
-    except OSError:
-        return None
-
-
-def _memory_facts() -> dict[str, object]:
-    memory: dict[str, object] = {
-        "rss": None,
-        "heap_total": None,
-        "heap_used": None,
-        "external": None,
-        "peak": None,
-    }
-    if resource is None:
-        return memory
-
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    # ru_maxrss is KiB on Linux and bytes on macOS/BSD.
-    memory["peak"] = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
-    return memory
-
-
-def _backend_exception_request_payload(candidate: object | None) -> dict[str, object]:
-    mapping = _dict_from_object(candidate)
-    payload: dict[str, object] = {
-        "method": str(mapping.get("method") or "UNKNOWN"),
-        "path": str(mapping.get("path") or "/"),
-        "query": _dict_from_object(mapping.get("query")),
-        "headers": _dict_from_object(mapping.get("headers")),
-    }
-    if "body" in mapping:
-        payload["body"] = mapping.get("body")
-    return payload
-
-
-def _backend_exception_response_payload(candidate: object | None) -> dict[str, object]:
-    mapping = _dict_from_object(candidate)
-    payload: dict[str, object] = {
-        "status_code": _coerce_int(mapping.get("status_code") or mapping.get("response_status"), 0),
-    }
-    if "headers" in mapping:
-        payload["headers"] = _dict_from_object(mapping.get("headers"))
-    if "body" in mapping:
-        payload["body"] = mapping.get("body")
-    return payload
-
-
-def _request_event_payload(
-    request: Mapping[str, object],
-    response: Mapping[str, object],
-    context: Mapping[str, object],
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "method": str(request.get("method") or "UNKNOWN"),
-        "path": str(request.get("path") or "/"),
-        "query": _dict_from_object(request.get("query")),
-        "headers": _dict_from_object(request.get("headers")),
-        "response_status": _coerce_int(response.get("response_status") or response.get("status_code"), 0),
-        "duration_ms": _coerce_int(response.get("duration_ms"), 0),
-    }
-    if "body" in request:
-        payload["body"] = request.get("body")
-    route_template = context.get("route_template") or response.get("route_template") or request.get("route_template")
-    if route_template is not None:
-        payload["route_template"] = str(route_template)
-    response_headers = response.get("response_headers") or response.get("headers")
-    if response_headers:
-        payload["response_headers"] = _dict_from_object(response_headers)
-    if "response_body" in response:
-        payload["response_body"] = response.get("response_body")
-    elif "body" in response and response.get("body") is not None:
-        payload["response_body"] = response.get("body")
-    return payload
-
-
-def _coerce_int(value: object, default: int) -> int:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
         try:
-            return int(value)
-        except ValueError:
-            return default
-    return default
-
-
-def _dict_from_object(value: object | None) -> dict[str, object]:
-    if isinstance(value, Mapping):
-        return {str(key): cast(object, nested_value) for key, nested_value in value.items()}
-    return {}
-
-
-def _correlation_payload(context: Mapping[str, object]) -> dict[str, str | None]:
-    return {
-        "request_id": _coerce_optional_string(context.get("request_id")),
-        "trace_id": _coerce_optional_string(context.get("trace_id")),
-        "session_id": _coerce_optional_string(context.get("session_id")),
-        "user_id_hash": _coerce_optional_string(context.get("user_id_hash")),
-    }
-
-
-def _event_context(context: Mapping[str, object]) -> dict[str, object]:
-    return {
-        str(key): value
-        for key, value in context.items()
-        if key not in {"request", "response", "correlation", "request_id", "trace_id", "session_id", "user_id_hash"}
-    }
-
-
-def _coerce_optional_string(value: object) -> str | None:
-    if value is None:
-        return None
-    return str(value)
-
-
-def _iso_now(time_provider: Callable[[], float]) -> str:
-    return datetime.fromtimestamp(time_provider(), tz=timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _is_immediate_request_incident_status(
-    status_code: int | None,
-    preset: str,
-    immediate_client_error_statuses: tuple[int, ...],
-    request_path: str | None = None,
-    http_method: str | None = None,
-    immediate_client_error_path_rules: tuple[object, ...] = (),
-) -> bool:
-    if status_code is None:
-        return False
-    if status_code >= 500:
-        return True
-    if status_code in immediate_client_error_statuses:
-        return True
-    if _matches_immediate_client_error_path_rule(
-        status_code,
-        request_path,
-        http_method,
-        immediate_client_error_path_rules,
-    ):
-        return True
-    if preset == "investigative":
-        return status_code in INVESTIGATIVE_IMMEDIATE_REQUEST_STATUSES
-    if preset == "balanced":
-        return status_code in BALANCED_IMMEDIATE_REQUEST_STATUSES
-    return False
-
-
-def _matches_immediate_client_error_path_rule(
-    status_code: int,
-    request_path: str | None,
-    http_method: str | None,
-    rules: tuple[object, ...],
-) -> bool:
-    if status_code < 400 or status_code > 499 or request_path is None:
-        return False
-    normalized_path = _normalize_request_path(request_path)
-    normalized_method = http_method.upper() if isinstance(http_method, str) else None
-    for rule in rules:
-        rule_status = getattr(rule, "status_code", None)
-        path_pattern = getattr(rule, "path_pattern", None)
-        methods = getattr(rule, "methods", ())
-        if rule_status != status_code or not isinstance(path_pattern, str):
-            continue
-        if methods and (normalized_method is None or normalized_method not in methods):
-            continue
-        if path_pattern.endswith("*"):
-            if normalized_path.startswith(path_pattern[:-1]):
-                return True
-        elif normalized_path == path_pattern:
-            return True
-    return False
-
-
-def _normalize_request_path(value: str) -> str:
-    from urllib.parse import urlparse
-
-    parsed = urlparse(value)
-    if parsed.path:
-        return parsed.path
-    return value.split("?", 1)[0].split("#", 1)[0] if value.startswith("/") else "/"
-
-
-def _time_now() -> float:
-    return datetime.now(tz=timezone.utc).timestamp()
-
-
-def _sdk_version() -> str:
-    try:
-        return metadata.version("debugbundle-python")
-    except metadata.PackageNotFoundError:
-        return "1.2.0"
-
-
-def _sdk_config_endpoint(events_endpoint: str) -> str:
-    if events_endpoint.endswith("/v1/events"):
-        return f"{events_endpoint[:-len('/v1/events')]}/v1/sdk/config"
-    return f"{events_endpoint.rstrip('/')}/sdk/config"
-
-
-def _serialize_error(error: Exception) -> dict[str, object]:
-    return {
-        "name": type(error).__name__,
-        "message": str(error),
-        "stack": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
-    }
+            self._on_diagnostic(diagnostic)
+        except Exception:
+            return
