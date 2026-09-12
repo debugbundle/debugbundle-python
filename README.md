@@ -4,7 +4,7 @@ Python SDK for DebugBundle.
 
 ![PyPI](https://img.shields.io/pypi/v/debugbundle-python?label=pypi)
 ![CI](https://img.shields.io/github/actions/workflow/status/debugbundle/debugbundle-python/ci.yml?branch=main&label=ci)
-![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 Use this package to capture Python backend exceptions, request metadata, structured logs, runtime context, and probe data. It supports vanilla Python plus Django, Flask, FastAPI, Python logging, structlog, loguru, and browser relay helpers.
 
@@ -306,4 +306,4 @@ CI validates Ruff, mypy, pytest, package build, event schema fixtures, and cover
 
 ## License
 
-AGPL-3.0-only. See `LICENSE`.
+Apache-2.0. See `LICENSE`.
