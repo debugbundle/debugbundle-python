@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Protocol
 
+from .structlog_integration import StructlogLoggerProxy as _StructlogLoggerProxy
+
 
 class LogCaptureApi(Protocol):
     def capture_log(
@@ -44,14 +46,18 @@ def _attach_structlog(
         if getattr(original_get_logger, "__debugbundle_structlog_wrapper__", False):
             return None
 
+        active = [True]
+
         def get_logger(*args: Any, **kwargs: Any) -> Any:
-            return _StructlogLoggerProxy(original_get_logger(*args, **kwargs), sdk)
+            return _StructlogLoggerProxy(original_get_logger(*args, **kwargs), sdk, active)
 
         setattr(get_logger, "__debugbundle_structlog_wrapper__", True)
         structlog.get_logger = get_logger
 
         def restore() -> None:
-            structlog.get_logger = original_get_logger
+            active[0] = False
+            if structlog.get_logger is get_logger:
+                structlog.get_logger = original_get_logger
 
         return restore
     except Exception as error:
@@ -98,40 +104,6 @@ def _normalize_level(level: str) -> str:
     if normalized == "exception":
         return "error"
     return normalized
-
-
-class _StructlogLoggerProxy:
-    def __init__(self, logger: Any, sdk: LogCaptureApi) -> None:
-        self._logger = logger
-        self._sdk = sdk
-
-    def bind(self, *args: Any, **kwargs: Any) -> _StructlogLoggerProxy:
-        return _StructlogLoggerProxy(self._logger.bind(*args, **kwargs), self._sdk)
-
-    def new(self, *args: Any, **kwargs: Any) -> _StructlogLoggerProxy:
-        return _StructlogLoggerProxy(self._logger.new(*args, **kwargs), self._sdk)
-
-    def __getattr__(self, name: str) -> Any:
-        attribute = getattr(self._logger, name)
-        if name not in {
-            "debug",
-            "info",
-            "warning",
-            "warn",
-            "error",
-            "critical",
-            "exception",
-        } or not callable(attribute):
-            return attribute
-
-        def wrapped(event: Any = None, *args: Any, **kwargs: Any) -> Any:
-            context = dict(kwargs)
-            for index, value in enumerate(args):
-                context[f"arg_{index}"] = value
-            self._sdk.capture_log(str(event or ""), level=_normalize_level(name), context=context or None)
-            return attribute(event, *args, **kwargs)
-
-        return wrapped
 
 
 def _emit_diagnostic(

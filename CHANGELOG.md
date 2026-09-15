@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1] - 2026-09-15
+
+### Fixed
+
+- Capture structlog records only after native level and processor filtering. Preserve bound context, async logging, native exceptions and return values.
+- Honor stdlib logger filters and disablement without duplicate capture; isolate capture callback failures and deactivate cached proxies on disposal.
+
 ## [1.4.0] - 2026-09-12
 
 ### Changed

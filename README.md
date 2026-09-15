@@ -10,6 +10,10 @@ Use this package to capture Python backend exceptions, request metadata, structu
 
 Requires Python 3.10 or newer.
 
+## Automatic capture and application filtering
+
+`capture_logging()` attaches the stdlib logging handler and detects installed structlog/loguru integrations. Obtain structlog loggers after attachment. Structlog level filters and `DropEvent` processors run before capture; stdlib-backed structlog loggers also honor logger filters, disabled state and `logging.disable()`. Bound context and async logging are supported. SDK disposal stops capture through cached proxies. DebugBundle has its own minimum capture level; destination-specific filters on other handlers or Loguru sinks do not configure the DebugBundle handler.
+
 ## Installation
 
 ```bash
