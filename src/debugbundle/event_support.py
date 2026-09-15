@@ -264,7 +264,7 @@ def sdk_version() -> str:
     try:
         return metadata.version("debugbundle-python")
     except metadata.PackageNotFoundError:
-        return "1.4.1"
+        return "1.4.2"
 
 
 def sdk_config_endpoint(events_endpoint: str) -> str:

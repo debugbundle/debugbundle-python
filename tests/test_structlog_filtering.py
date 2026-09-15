@@ -99,6 +99,22 @@ def test_structlog_capture_failures_do_not_change_native_result_or_repeat_proces
         restore()
 
 
+def test_structlog_console_renderer_preserves_message_and_context():
+    sdk = Capture()
+    output = io.StringIO()
+    structlog.configure(
+        logger_factory=structlog.PrintLoggerFactory(file=output),
+        processors=[structlog.dev.ConsoleRenderer(colors=False)],
+    )
+    restore = _attach_structlog(sdk)
+    try:
+        structlog.get_logger().error("rendered message", order_id="123")
+        assert sdk.events == [("rendered message", "error", {"order_id": "123"})]
+        assert "rendered message" in output.getvalue()
+    finally:
+        restore()
+
+
 def test_structlog_numeric_log_is_filtered():
     sdk = Capture()
     structlog.configure(

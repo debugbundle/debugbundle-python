@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.4.2] - 2026-09-16
+
+### Fixed
+
+- Preserve the processed structlog message and context when a final renderer consumes fields in place, including the default ConsoleRenderer. Native filtering and renderer behavior remain intact.
+
 ## [1.4.1] - 2026-09-15
 
 ### Fixed

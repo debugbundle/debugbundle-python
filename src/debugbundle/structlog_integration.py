@@ -88,8 +88,11 @@ class StructlogLoggerProxy:
                     last = processors[-1]
 
                     def observe(logger: Any, level: str, event: Any) -> Any:
+                        # Renderers such as ConsoleRenderer consume fields in place.
+                        # Preserve the processed event before that final rendering.
+                        before_render = dict(event) if isinstance(event, dict) else event
                         result = last(logger, level, event)
-                        snapshot = result if isinstance(result, dict) else event
+                        snapshot = result if isinstance(result, dict) else before_render
                         if isinstance(snapshot, dict):
                             record.clear()
                             record.update(snapshot)
