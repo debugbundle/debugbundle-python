@@ -70,7 +70,7 @@ def test_standalone_ci_workflow_covers_python_sdk_checks() -> None:
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert "actions/setup-python@v6" in workflow
-    assert 'python-version: ["3.10", "3.11", "3.12"]' in workflow
+    assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in workflow
     assert "python-version: ${{ matrix.python-version }}" in workflow
     assert "python -m pip install -e .[dev]" in workflow
     assert "ruff check src tests" in workflow

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import platform
 import sys
 import uuid
@@ -91,6 +92,28 @@ def test_before_send_mutates_after_redaction_and_before_queueing() -> None:
     events = transport.calls[0]["events"]
     assert isinstance(events, list)
     assert events[0]["payload"]["message"] == "mutated"
+
+
+def test_hook_cannot_reintroduce_credentials_and_context_is_scrubbed_before_buffering() -> None:
+    transport = FakeTransport()
+    observed: list[str] = []
+
+    def hook(event: dict[str, object]) -> dict[str, object]:
+        observed.append(json.dumps(event))
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        payload["message"] = "Bearer POST_HOOK_SECRET"
+        return event
+
+    sdk = DebugBundleSdk(transport=transport)
+    sdk.init(project_token="dbundle_proj_test", before_send=hook, redact_fields=[])
+    sdk.set_context("password", "PREBUFFER_SECRET")
+    assert "PREBUFFER_SECRET" not in json.dumps(sdk._context)
+    sdk.capture_message("Authorization: Bearer ORIGINAL_SECRET", level="error")
+    sdk.flush()
+    assert "ORIGINAL_SECRET" not in observed[0]
+    assert "POST_HOOK_SECRET" not in json.dumps(transport.calls)
+    assert "PREBUFFER_SECRET" not in json.dumps(transport.calls)
 
 
 def test_before_send_drop_invalid_failure_and_sampling_are_safe() -> None:

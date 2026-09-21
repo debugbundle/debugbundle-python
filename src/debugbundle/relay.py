@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from .redaction import UnsafeTelemetry, has_safe_event_identity, sanitize_telemetry
 from .relay_delivery import (
     AtomicRelayFileTransport,
     RelayForwardTransport,
@@ -392,4 +393,11 @@ def _sanitize_event(
         if normalized_correlation:
             sanitized["correlation"] = normalized_correlation
 
+    try:
+        if not has_safe_event_identity(sanitized):
+            return None
+        sanitized["payload"] = sanitize_telemetry(sanitized["payload"])
+        sanitized["service"] = sanitize_telemetry(sanitized["service"])
+    except UnsafeTelemetry:
+        return None
     return sanitized

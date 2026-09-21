@@ -187,7 +187,7 @@ def _run_installed_smoke(schema_path: Path) -> None:
         debugbundle.capture_message(
             "python app-driven smoke message",
             level="error",
-            context={"feature": "app-driven-smoke"},
+            context={"feature": "app-driven-smoke", "note": "password=PACKED_SMOKE_SECRET"},
         )
         return jsonify(ok=False, smoke=True), 503
 
@@ -242,6 +242,9 @@ def _run_installed_smoke(schema_path: Path) -> None:
 
     if len(server.requests) < 2:
         raise AssertionError(f"Expected at least 2 ingestion requests, got {len(server.requests)}")
+
+    if any("PACKED_SMOKE_SECRET" in json.dumps(request.body) for request in server.requests):
+        raise AssertionError("Installed SDK leaked the privacy canary.")
 
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     validator = Draft202012Validator(schema)

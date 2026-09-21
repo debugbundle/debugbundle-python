@@ -45,7 +45,13 @@ from .event_support import (
     time_now,
 )
 from .logger_integrations import attach_optional_integrations
-from .redaction import DEFAULT_REDACT_FIELDS, redact_value
+from .redaction import (
+    DEFAULT_REDACT_FIELDS,
+    UnsafeTelemetry,
+    has_safe_event_identity,
+    redact_value,
+    sanitize_telemetry,
+)
 from .suppression import EventSuppressionTracker
 from .transport import HttpTransport, Transport, coerce_transport_response
 from .trigger_token import resolve_request_trigger_directives
@@ -322,7 +328,12 @@ class DebugBundleSdk:
 
     def set_context(self, key: str, value: object) -> None:
         with self._lock:
-            self._context[key] = redact_value({key: value}, self._redact_fields)[key]
+            try:
+                protected = sanitize_telemetry({key: value}, self._redact_fields)
+                if isinstance(protected, dict):
+                    self._context[key] = protected.get(key)
+            except UnsafeTelemetry:
+                return
 
     def _bind_scoped_context(self, context: Mapping[str, object]) -> Token[dict[str, object] | None]:
         scoped_context = dict(self._scoped_context.get() or {})
@@ -330,7 +341,11 @@ class DebugBundleSdk:
             if value is None:
                 continue
             scoped_context[str(key)] = value
-        return self._scoped_context.set(cast(dict[str, object], redact_value(scoped_context, self._redact_fields)))
+        try:
+            protected = sanitize_telemetry(scoped_context, self._redact_fields)
+            return self._scoped_context.set(cast(dict[str, object], protected))
+        except UnsafeTelemetry:
+            return self._scoped_context.set({})
 
     def _reset_scoped_context(self, token: Token[dict[str, object] | None]) -> None:
         self._scoped_context.reset(token)
@@ -433,11 +448,17 @@ class DebugBundleSdk:
             if label not in self._probe_buffers and len(self._probe_buffers) >= self._max_probe_labels:
                 return
 
-            value = data() if callable(data) else data
-            if not isinstance(value, Mapping):
-                value = {"value": value}
-
-            redacted_value = redact_mapping(dict(value), self._redact_fields)
+            try:
+                protected_label = sanitize_telemetry(label, self._redact_fields)
+                value = data() if callable(data) else data
+                if not isinstance(value, Mapping):
+                    value = {"value": value}
+                redacted_value = sanitize_telemetry(dict(value), self._redact_fields)
+                if not isinstance(protected_label, str) or not isinstance(redacted_value, dict):
+                    return
+                label = protected_label
+            except Exception:
+                return
 
             if is_heavy:
                 self._emit_probe_events(label, redacted_value, matching_directives)
@@ -613,8 +634,23 @@ class DebugBundleSdk:
             merged.update({str(key): value for key, value in context.items()})
         return cast(dict[str, object], redact_value(merged, self._redact_fields))
 
+    def _protect_event(self, event: dict[str, object]) -> dict[str, object] | None:
+        try:
+            if not has_safe_event_identity(event, self._redact_fields):
+                return None
+            candidate = dict(event)
+            for key in ("payload", "context", "service"):
+                if key in candidate:
+                    candidate[key] = sanitize_telemetry(candidate[key], self._redact_fields)
+            return candidate
+        except UnsafeTelemetry:
+            return None
+
     def _enqueue_event(self, event: dict[str, object]) -> None:
-        self._buffer.append(event)
+        protected = self._protect_event(event)
+        if protected is None:
+            return
+        self._buffer.append(protected)
         if len(self._buffer) >= self._batch_size:
             self.flush()
             return
@@ -638,14 +674,20 @@ class DebugBundleSdk:
             aggregate.update(self._base_event(event_type, cast(dict[str, object], payload)))
             prepared = self._apply_before_send_event(aggregate)
             if prepared is not None:
-                self._buffer.append(prepared)
+                protected = self._protect_event(prepared)
+                if protected is not None:
+                    self._buffer.append(protected)
 
     def _apply_before_send_event(self, event: dict[str, object]) -> dict[str, object] | None:
-        return apply_before_send(
-            event,
+        protected = self._protect_event(event)
+        if protected is None:
+            return None
+        result = apply_before_send(
+            protected,
             self._before_send,
             lambda code, message: self._emit_diagnostic(code, message),
         )
+        return self._protect_event(result) if result is not None else None
 
     def _build_probe_data(self) -> dict[str, object] | None:
         items: list[dict[str, object]] = []
@@ -780,7 +822,10 @@ class DebugBundleSdk:
             return
         diagnostic: dict[str, object] = {"code": code, "message": message}
         if metadata is not None:
-            diagnostic["metadata"] = metadata
+            try:
+                diagnostic["metadata"] = sanitize_telemetry(metadata, self._redact_fields)
+            except UnsafeTelemetry:
+                pass
         try:
             self._on_diagnostic(diagnostic)
         except Exception:

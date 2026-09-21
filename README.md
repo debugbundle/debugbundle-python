@@ -224,8 +224,8 @@ There is no zero-install fallback for the Python SDK itself in V1. The nearest l
 
 | Surface | Minimum compatibility version | Recommended production version | Installed-base compatibility lane | Rolling CI lane | Out of scope |
 | --- | --- | --- | --- | --- | --- |
-| Python runtime | 3.10 | 3.12 | 3.10 and 3.11 remain supported for installed-base coverage | 3.12 | 3.9 and older |
-| Django | 5.x | latest 5.x patch | 5.x compatibility support | repo release smoke and tests install Django 5.x | Django 4.x and older |
+| Python runtime | 3.10 | 3.14 | 3.10 through 3.13 remain supported for installed-base coverage | 3.10 through 3.14 | 3.9 and older |
+| Django | 5.x | latest 6.1 patch | 5.x compatibility support | Python 3.14 suite exercises Django 6.1 | Django 4.x and older |
 | Flask | 3.x | latest 3.x patch | 3.x compatibility support | repo release smoke installs Flask 3.x | Flask 2.x and older |
 | FastAPI | 0.115+ | latest 0.115+ patch line | 0.115+ compatibility support | repo tests install FastAPI 0.115+ | standalone Starlette, older FastAPI lines |
 
@@ -236,7 +236,7 @@ Post-V1 planned expansions from `spec/sdk-language-targets.md` remain out of sco
 `debugbundle-python` ships as one package in V1, so there is no multi-package version-alignment step like a BOM or plugin family lock.
 
 - Pin one `debugbundle-python` version across your service and worker repos when you want identical SDK behavior everywhere.
-- Keep framework dependencies inside the supported lanes above: Django 5.x, Flask 3.x, and FastAPI 0.115+.
+- Keep framework dependencies inside the supported lanes above: Django 5.x or 6.x, Flask 3.x, and FastAPI 0.115+.
 - The packaged HTTP client dependency is `httpx>=0.27,<0.29`; if you override transport behavior in tests or wrappers, stay inside that range unless you retest the SDK.
 
 ## Safety Defaults

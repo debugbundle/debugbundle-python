@@ -72,6 +72,17 @@ def test_accepts_valid_batch() -> None:
     assert response.body["rejected"] == 0
 
 
+def test_relay_scrubs_old_browser_payload_before_acceptance() -> None:
+    accepted: list[BrowserRelayAcceptedBatch] = []
+    handler = BrowserRelayHandler(allowed_origins=["https://example.com"], on_accept=accepted.append)
+    event = _valid_event()
+    event["payload"]["message"] = "Authorization: Bearer RELAY_SECRET"
+    event["payload"]["data"] = {"password": "RELAY_SECRET"}
+    response = handler.handle(_make_request({"batch": [event]}))
+    assert response.status == 202
+    assert "RELAY_SECRET" not in json.dumps(accepted[0].events)
+
+
 def test_accepts_analytics_events_and_preserves_analytics_correlation() -> None:
     fixture = _relay_compliance_fixture("valid-analytics-event")
     accepted: list[BrowserRelayAcceptedBatch] = []

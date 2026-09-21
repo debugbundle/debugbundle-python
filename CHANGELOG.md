@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+## [1.5.0] - 2026-09-21
+
+### Security
+
+- Enforce bounded mandatory telemetry protection before context and probe retention, after `before_send`, and before queued or connected delivery. Custom redaction remains additive to the baseline.
+
 ## [1.4.2] - 2026-09-16
 
 ### Fixed
@@ -18,8 +26,6 @@
 ### Changed
 
 - License first-party SDK code under Apache-2.0 and ship consistent package licensing metadata and license text.
-
-## [Unreleased]
 
 ## [1.3.0] - 2026-07-28
 
