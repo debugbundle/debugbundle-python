@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -154,7 +155,70 @@ def _find_event(requests: list[RecordedRequest], predicate: Any) -> tuple[Record
     raise AssertionError("Expected smoke event was not delivered.")
 
 
+def _run_installed_fork_smoke() -> None:
+    if not hasattr(os, "fork") or not version("debugbundle-python").startswith("2."):
+        return
+
+    from debugbundle.core import DebugBundleSdk
+    from debugbundle.transport import TransportResponse
+
+    calls: list[dict[str, Any]] = []
+
+    def transport(request: dict[str, Any]) -> TransportResponse:
+        calls.append(request)
+        return TransportResponse(status_code=202)
+
+    sdk = DebugBundleSdk(transport=transport)
+    sdk.init(project_token=PROJECT_TOKEN, flush_interval=60)
+    sdk.capture_log("pre-fork parent event", level="error")
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with sdk._lock:
+            locked.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    if not locked.wait(timeout=2):
+        raise AssertionError("Installed SDK lock probe did not start.")
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_fd)
+        try:
+            sdk.capture_exception(RuntimeError("post-fork child event"))
+            sdk.flush()
+            events = [event for call in calls for event in call["events"]]
+            os.write(write_fd, json.dumps([event["payload"]["message"] for event in events]).encode())
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+    os.close(write_fd)
+    try:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            finished, status = os.waitpid(child, os.WNOHANG)
+            if finished:
+                if os.waitstatus_to_exitcode(status) != 0:
+                    raise AssertionError("Installed SDK fork child failed.")
+                if json.loads(os.read(read_fd, 4096)) != ["post-fork child event"]:
+                    raise AssertionError("Installed SDK child retained a parent event.")
+                return
+            time.sleep(0.01)
+        os.kill(child, 9)
+        os.waitpid(child, 0)
+        raise AssertionError("Installed SDK child blocked on a parent-held lock.")
+    finally:
+        os.close(read_fd)
+        release.set()
+        holder.join(timeout=2)
+        sdk.dispose()
+
+
 def _run_installed_smoke(schema_path: Path) -> None:
+    _run_installed_fork_smoke()
     from flask import Flask, jsonify
     from jsonschema import Draft202012Validator
 

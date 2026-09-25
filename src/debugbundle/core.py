@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import sys
 import threading
-import traceback
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
 from random import random
 from typing import Any, Protocol, cast
 
 from .acknowledgement import decide_acknowledgement
 from .before_send import BeforeSendHook, apply_before_send
+from .capture_hooks import DebugBundleLogHandler, try_capture_lock
 from .config import (
     BALANCED_CAPTURE_POLICY,
     DEFAULT_PROBES_POLL_INTERVAL_MS,
@@ -25,6 +27,7 @@ from .config import (
     find_matching_remote_probe_directives,
     parse_remote_config,
 )
+from .delivery_hooks import finalize_batch
 from .event_support import (
     DEFAULT_LOG_LEVEL,
     LEVEL_RANKS,
@@ -32,7 +35,6 @@ from .event_support import (
     backend_exception_response_payload,
     correlation_payload,
     event_context,
-    is_immediate_request_incident_status,
     iso_now,
     level_enabled,
     normalize_level,
@@ -44,7 +46,12 @@ from .event_support import (
     serialize_error,
     time_now,
 )
+from .exception_snapshot import exception_details
+from .flush_aggregates import prepare_flush_aggregates
 from .logger_integrations import attach_optional_integrations
+from .probe_capture import ProbeEntry, capture_probe
+from .process_support import ensure_current_process
+from .queue_admission import evict_low_priority, high_priority_event, may_prepare_event
 from .redaction import (
     DEFAULT_REDACT_FIELDS,
     UnsafeTelemetry,
@@ -52,6 +59,7 @@ from .redaction import (
     redact_value,
     sanitize_telemetry,
 )
+from .request_capture_policy import should_capture_request_event
 from .suppression import EventSuppressionTracker
 from .transport import HttpTransport, Transport, coerce_transport_response
 from .trigger_token import resolve_request_trigger_directives
@@ -60,13 +68,8 @@ DEFAULT_BATCH_SIZE = 25
 DEFAULT_FLUSH_INTERVAL = 5.0
 DEFAULT_ENDPOINT = "https://api.debugbundle.com/v1/events"
 SCHEMA_VERSION = "2026-03-01"
-
-
-@dataclass
-class ProbeEntry:
-    label: str
-    data: dict[str, object]
-    timestamp: str
+MAX_PENDING_EVENTS = 1_000
+MAX_PENDING_BYTES = 8 * 1024 * 1024
 
 
 class ConfigFetchResponse(Protocol):
@@ -76,23 +79,6 @@ class ConfigFetchResponse(Protocol):
     def json(self) -> object: ...
 
 
-class DebugBundleLogHandler(logging.Handler):
-    def __init__(self, sdk: DebugBundleSdk) -> None:
-        super().__init__()
-        self._sdk = sdk
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self._sdk.capture_log(
-            record.getMessage(),
-            level=record.levelname.lower(),
-            context={
-                "logger_name": record.name,
-                "pathname": record.pathname,
-                "lineno": record.lineno,
-            },
-        )
-
-
 class DebugBundleSdk:
     def __init__(
         self,
@@ -100,10 +86,12 @@ class DebugBundleSdk:
         time_provider: Callable[[], float] | None = None,
     ) -> None:
         self._transport_override = transport
+        self._pid = os.getpid()
         self._time_provider = time_provider or time_now
         self._lock = threading.RLock()
         self._timer: threading.Timer | None = None
         self._remote_config_timer: threading.Timer | None = None
+        self._initial_config_ready = threading.Event()
         self._transport: Transport | None = None
         self._http_transport: HttpTransport | None = None
         self._enabled = False
@@ -117,6 +105,15 @@ class DebugBundleSdk:
         self._sample_rate = 1.0
         self._redact_fields = set(DEFAULT_REDACT_FIELDS)
         self._buffer: list[dict[str, object]] = []
+        self._buffer_sizes: dict[int, int] = {}
+        self._buffer_bytes = 0
+        self._pending_low_priority = 0
+        self._sending = False
+        self._inflight_count = 0
+        self._timer_due_at = 0.0
+        self._generation = 0
+        self._pressure_drops = 0
+        self._last_pressure_report_at = 0.0
         self._context: dict[str, object] = {}
         self._scoped_context: ContextVar[dict[str, object] | None] = ContextVar(
             "debugbundle_scoped_context",
@@ -147,6 +144,7 @@ class DebugBundleSdk:
 
     @property
     def status(self) -> str:
+        ensure_current_process(self)
         with self._lock:
             if not self._enabled:
                 return "disconnected"
@@ -158,6 +156,7 @@ class DebugBundleSdk:
 
     @property
     def last_event_at(self) -> float | None:
+        ensure_current_process(self)
         with self._lock:
             return self._last_event_at
 
@@ -181,6 +180,7 @@ class DebugBundleSdk:
         before_send: BeforeSendHook | None = None,
         probes_poll_interval: int = DEFAULT_PROBES_POLL_INTERVAL_MS,
     ) -> None:
+        ensure_current_process(self)
         with self._lock:
             self.dispose()
             self._project_token = project_token.strip()
@@ -199,6 +199,10 @@ class DebugBundleSdk:
             self._max_probe_entries_per_label = max(1, max_probe_entries_per_label)
             self._probe_flush_on_error = probe_flush_on_error
             self._buffer = []
+            self._buffer_sizes = {}
+            self._buffer_bytes = 0
+            self._pending_low_priority = 0
+            self._generation += 1
             self._context = {}
             self._probe_buffers = {}
             self._suppression = EventSuppressionTracker()
@@ -211,14 +215,25 @@ class DebugBundleSdk:
             self._configured_probes_poll_interval_ms = max(1, int(probes_poll_interval))
             self._remote_config_etag = None
             self._remote_config_snapshot = None
-            self._capture_policy = BALANCED_CAPTURE_POLICY
+            self._capture_policy = MINIMAL_CAPTURE_POLICY if fetch_impl is not None else BALANCED_CAPTURE_POLICY
             self._transport = self._transport_override
             if self._transport is None and self._enabled:
                 self._http_transport = HttpTransport(self._endpoint)
                 self._transport = self._http_transport
             self.capture_exceptions()
             if self._enabled and self._fetch_impl is not None:
-                self._refresh_remote_config(initial=True)
+                self._initial_config_ready.clear()
+                self._remote_config_timer = threading.Timer(0.0, self._refresh_initial_remote_config)
+                self._remote_config_timer.daemon = True
+                self._remote_config_timer.start()
+            else:
+                self._initial_config_ready.set()
+
+    def _refresh_initial_remote_config(self) -> None:
+        try:
+            self._refresh_remote_config(initial=True)
+        finally:
+            self._initial_config_ready.set()
 
     def capture_exception(self, error: BaseException, context: Mapping[str, object] | None = None) -> None:
         self._capture_exception(error, context=context, handled=True)
@@ -229,31 +244,33 @@ class DebugBundleSdk:
         context: Mapping[str, object] | None = None,
         handled: bool = True,
     ) -> None:
-        with self._lock:
-            if not self._enabled:
-                return
-
+        ensure_current_process(self)
+        if not self._enabled or not may_prepare_event(self, True, MAX_PENDING_EVENTS, MAX_PENDING_BYTES):
+            return
+        try:
+            name, message, stack = exception_details(error)
             redacted_context = redact_mapping(dict(context or {}), self._redact_fields)
             request_payload = backend_exception_request_payload(redacted_context.get("request"))
             response_payload = backend_exception_response_payload(redacted_context.get("response"))
 
             payload: dict[str, object] = {
-                "name": type(error).__name__,
-                "message": str(error),
-                "stack": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
+                "name": name,
+                "message": message,
+                "stack": stack,
                 "handled": handled,
                 "request": request_payload,
                 "response": response_payload,
                 "runtime": runtime_process_facts(),
             }
-            if self._probe_flush_on_error:
-                probe_data = self._build_probe_data()
+            if self._probe_flush_on_error and try_capture_lock(self):
+                try:
+                    probe_data = self._build_probe_data()
+                finally:
+                    self._lock.release()
                 if probe_data is not None:
                     payload["probe_data"] = probe_data
 
-            event = self._apply_before_send_event(
-                self._base_event("backend_exception", payload, context=redacted_context)
-            )
+            event = self._protect_event(self._base_event("backend_exception", payload, context=redacted_context))
             if event is None or not self._passes_sample_rate():
                 return
             event_payload = cast(dict[str, object], event["payload"])
@@ -261,9 +278,17 @@ class DebugBundleSdk:
                 f"{event['event_type']}:{event_payload.get('name', '')}:"
                 f"{event_payload.get('message', '')}:{event_payload.get('stack', '')}"
             )
-            if not self._suppression.should_capture(suppression_key, self._time_provider()):
+            event_bytes = self._event_bytes(event)
+            if not try_capture_lock(self):
+                self._pressure_drops += 1
                 return
-            self._enqueue_event(event)
+            try:
+                if self._enabled and self._suppression.should_capture(suppression_key, self._time_provider()):
+                    self._offer_protected_event(event, event_bytes)
+            finally:
+                self._lock.release()
+        except BaseException:
+            return
 
     def capture_error(self, error: BaseException, context: Mapping[str, object] | None = None) -> None:
         self.capture_exception(error, context=context)
@@ -274,9 +299,16 @@ class DebugBundleSdk:
         level: str = DEFAULT_LOG_LEVEL,
         context: Mapping[str, object] | None = None,
     ) -> None:
-        normalized_level = normalize_level(level)
-        with self._lock:
-            if not self._enabled:
+        try:
+            normalized_level = normalize_level(level)
+            if not self._enabled or self._capture_policy.capture_logs == "off" or not level_enabled(
+                normalized_level, self._effective_log_threshold()
+            ):
+                return
+            ensure_current_process(self)
+            if not may_prepare_event(
+                self, normalized_level in ("error", "critical"), MAX_PENDING_EVENTS, MAX_PENDING_BYTES
+            ):
                 return
             payload: dict[str, object] = {
                 "message": message,
@@ -285,15 +317,23 @@ class DebugBundleSdk:
             }
             if context:
                 payload["attributes"] = redact_mapping(dict(context), self._redact_fields)
-            event = self._apply_before_send_event(self._base_event("log_event", payload, context=context))
+            event = self._protect_event(self._base_event("log_event", payload, context=context))
             if (
                 event is None
                 or not self._passes_sample_rate()
-                or self._capture_policy.capture_logs == "off"
-                or not level_enabled(normalized_level, self._effective_log_threshold())
             ):
                 return
-            self._enqueue_event(event)
+            event_bytes = self._event_bytes(event)
+            if not try_capture_lock(self):
+                self._pressure_drops += 1
+                return
+            try:
+                if self._log_level_eligible(normalized_level):
+                    self._offer_protected_event(event, event_bytes)
+            finally:
+                self._lock.release()
+        except BaseException:
+            return
 
     def capture_request(
         self,
@@ -301,22 +341,34 @@ class DebugBundleSdk:
         response: Mapping[str, object] | None = None,
         context: Mapping[str, object] | None = None,
     ) -> None:
-        with self._lock:
-            if not self._enabled:
+        try:
+            if not self._enabled or not should_capture_request_event(self._capture_policy, request, response):
+                return
+            ensure_current_process(self)
+            status = None if response is None else response.get("status_code") or response.get("response_status")
+            if not may_prepare_event(
+                self, type(status) is int and status >= 500, MAX_PENDING_EVENTS, MAX_PENDING_BYTES
+            ):
                 return
             payload = request_event_payload(
                 redact_mapping(dict(request), self._redact_fields),
                 redact_mapping(dict(response or {}), self._redact_fields),
                 redact_mapping(dict(context or {}), self._redact_fields),
             )
-            event = self._apply_before_send_event(self._base_event("request_event", payload, context=context))
-            if (
-                event is None
-                or not self._passes_sample_rate()
-                or not self._should_capture_request_event(request, response)
-            ):
+            event = self._protect_event(self._base_event("request_event", payload, context=context))
+            if event is None or not self._passes_sample_rate():
                 return
-            self._enqueue_event(event)
+            event_bytes = self._event_bytes(event)
+            if not try_capture_lock(self):
+                self._pressure_drops += 1
+                return
+            try:
+                if self._enabled:
+                    self._offer_protected_event(event, event_bytes)
+            finally:
+                self._lock.release()
+        except BaseException:
+            return
 
     def capture_message(
         self,
@@ -327,15 +379,22 @@ class DebugBundleSdk:
         self.capture_log(message, level=level or DEFAULT_LOG_LEVEL, context=context)
 
     def set_context(self, key: str, value: object) -> None:
-        with self._lock:
-            try:
-                protected = sanitize_telemetry({key: value}, self._redact_fields)
-                if isinstance(protected, dict):
-                    self._context[key] = protected.get(key)
-            except UnsafeTelemetry:
+        try:
+            ensure_current_process(self)
+            protected = sanitize_telemetry({key: value}, self._redact_fields)
+            if not isinstance(protected, dict) or not try_capture_lock(self):
                 return
+            try:
+                next_context = dict(self._context)
+                next_context[key] = protected.get(key)
+                self._context = next_context
+            finally:
+                self._lock.release()
+        except BaseException:
+            return
 
     def _bind_scoped_context(self, context: Mapping[str, object]) -> Token[dict[str, object] | None]:
+        ensure_current_process(self)
         scoped_context = dict(self._scoped_context.get() or {})
         for key, value in context.items():
             if value is None:
@@ -351,129 +410,165 @@ class DebugBundleSdk:
         self._scoped_context.reset(token)
 
     def flush(self) -> None:
+        ensure_current_process(self)
         with self._lock:
-            if not self._enabled or self._transport is None:
+            if not self._enabled or self._transport is None or self._sending:
                 return
-
-            self._append_suppression_aggregates()
-            if not self._buffer:
-                return
-
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
             now = self._time_provider()
             if now < self._retry_after:
+                self._schedule_flush_locked(delay=self._retry_after - now)
                 return
+            self._sending = True
+            generation = self._generation
+            suppression = self._suppression.drain_aggregates(now)
+            pressure_count = (
+                self._pressure_drops
+                if self._pressure_drops and now - self._last_pressure_report_at >= 60.0
+                and len(self._buffer) < MAX_PENDING_EVENTS else 0
+            )
 
-            batch = [dict(event) for event in self._buffer]
+        try:
+            aggregates, pressure = prepare_flush_aggregates(self, suppression, pressure_count)
+        except BaseException:
+            aggregates, pressure = [], None
+
+        with self._lock:
+            if generation != self._generation:
+                self._sending = False
+                self._inflight_count = 0
+                if self._buffer:
+                    self._schedule_flush_locked()
+                return
+            for aggregate, aggregate_bytes in aggregates:
+                self._offer_protected_event(aggregate, aggregate_bytes)
+            if (pressure is not None and len(self._buffer) < MAX_PENDING_EVENTS
+                    and self._buffer_bytes + pressure[1] <= MAX_PENDING_BYTES
+                    and self._offer_protected_event(*pressure)):
+                self._pressure_drops = max(0, self._pressure_drops - pressure_count)
+                self._last_pressure_report_at = now
+            if not self._buffer:
+                self._sending = False
+                self._schedule_pressure_report_locked()
+                return
+            batch = list(self._buffer)
+            self._inflight_count = len(batch)
+            self._pending_low_priority = 0
+            transport = self._transport
             request = {
                 "project_token": self._project_token,
                 "events": batch,
             }
 
-            try:
-                response = coerce_transport_response(self._transport(request))
-            except Exception:
-                self._consecutive_failures += 1
-                self._schedule_flush_locked()
-                return
+        finalized = finalize_batch(self, batch, generation, MAX_PENDING_BYTES)
 
-            if 200 <= response.status_code < 300:
-                acknowledgement = decide_acknowledgement(response.body, len(batch))
-                if acknowledgement.kind == "protocol_failure":
+        with self._lock:
+            if generation != self._generation or finalized is None:
+                self._sending = False
+                self._inflight_count = 0
+                if self._buffer:
+                    self._schedule_flush_locked()
+                return
+            batch = finalized
+            self._inflight_count = len(batch)
+            if not batch:
+                self._sending = False
+                if self._buffer:
+                    self._schedule_flush_locked()
+                return
+            request["events"] = batch
+
+        try:
+            response = coerce_transport_response(transport(request))
+        except BaseException:
+            response = None
+
+        with self._lock:
+            self._sending = False
+            self._inflight_count = 0
+            if generation != self._generation:
+                if self._buffer:
+                    self._schedule_flush_locked()
+                return
+            try:
+                if response is None:
                     self._consecutive_failures += 1
+                    self._schedule_flush_locked()
+                    return
+
+                if 200 <= response.status_code < 300:
+                    acknowledgement = decide_acknowledgement(response.body, len(batch))
+                    if acknowledgement.kind == "protocol_failure":
+                        self._consecutive_failures += 1
+                        retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
+                        self._retry_after = now + (retry_after_ms / 1000)
+                        self._emit_diagnostic(
+                            "ingestion_acknowledgement_invalid",
+                            "sdk-python retained a batch after an invalid ingestion acknowledgement",
+                            metadata={"reason": acknowledgement.reason or "invalid"},
+                        )
+                        self._schedule_flush_locked(delay=retry_after_ms / 1000)
+                        return
+                    if acknowledgement.kind == "legacy":
+                        self._buffer = self._buffer[len(batch) :]
+                        self._retry_after = 0.0
+                        self._last_event_at = self._time_provider() * 1000
+                        self._consecutive_failures = 0
+                        return
+
+                    trailing_events = self._buffer[len(batch) :]
+                    self._buffer = [
+                        batch[index] for index in acknowledgement.retryable_indices if 0 <= index < len(batch)
+                    ] + trailing_events
+                    if acknowledgement.terminal_errors:
+                        self._emit_diagnostic(
+                            "ingestion_events_rejected",
+                            "sdk-python removed terminally rejected ingestion events",
+                            metadata={
+                                "rejected_count": len(acknowledgement.terminal_errors),
+                                "reasons": sorted({reason for _, reason in acknowledgement.terminal_errors}),
+                            },
+                        )
+                    if acknowledgement.accepted > 0:
+                        self._last_event_at = self._time_provider() * 1000
+                    if acknowledgement.retryable_indices:
+                        self._consecutive_failures += 1
+                        retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
+                        self._retry_after = now + (retry_after_ms / 1000)
+                        self._schedule_flush_locked(delay=retry_after_ms / 1000)
+                        return
+                    self._retry_after = 0.0
+                    self._consecutive_failures = 0 if acknowledgement.accepted > 0 else 3
+                    return
+
+                self._consecutive_failures += 1
+                if response.status_code == 429:
                     retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
                     self._retry_after = now + (retry_after_ms / 1000)
-                    self._emit_diagnostic(
-                        "ingestion_acknowledgement_invalid",
-                        "sdk-python retained a batch after an invalid ingestion acknowledgement",
-                        metadata={"reason": acknowledgement.reason or "invalid"},
-                    )
                     self._schedule_flush_locked(delay=retry_after_ms / 1000)
                     return
-                if acknowledgement.kind == "legacy":
+                if 400 <= response.status_code < 500:
                     self._buffer = self._buffer[len(batch) :]
                     self._retry_after = 0.0
-                    self._last_event_at = self._time_provider() * 1000
-                    self._consecutive_failures = 0
                     return
-
-                trailing_events = self._buffer[len(batch) :]
-                self._buffer = [
-                    batch[index] for index in acknowledgement.retryable_indices if 0 <= index < len(batch)
-                ] + trailing_events
-                if acknowledgement.terminal_errors:
-                    self._emit_diagnostic(
-                        "ingestion_events_rejected",
-                        "sdk-python removed terminally rejected ingestion events",
-                        metadata={
-                            "rejected_count": len(acknowledgement.terminal_errors),
-                            "reasons": sorted({reason for _, reason in acknowledgement.terminal_errors}),
-                        },
-                    )
-                if acknowledgement.accepted > 0:
-                    self._last_event_at = self._time_provider() * 1000
-                if acknowledgement.retryable_indices:
-                    self._consecutive_failures += 1
-                    retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
-                    self._retry_after = now + (retry_after_ms / 1000)
-                    self._schedule_flush_locked(delay=retry_after_ms / 1000)
-                    return
-                self._retry_after = 0.0
-                self._consecutive_failures = 0 if acknowledgement.accepted > 0 else 3
-                return
-
-            self._consecutive_failures += 1
-            if response.status_code == 429:
-                retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
-                self._retry_after = now + (retry_after_ms / 1000)
-                self._schedule_flush_locked(delay=retry_after_ms / 1000)
-                return
-
-            if 400 <= response.status_code < 500:
-                self._buffer = []
-                self._retry_after = 0.0
-                return
-
-            self._schedule_flush_locked()
+                self._schedule_flush_locked()
+            finally:
+                self._buffer_sizes = {id(event): self._buffer_sizes[id(event)]
+                                      for event in self._buffer}
+                self._buffer_bytes = sum(self._buffer_sizes.values())
+                self._pending_low_priority = sum(not high_priority_event(event) for event in self._buffer)
+                if self._buffer and self._timer is None and self._retry_after <= self._time_provider():
+                    self._schedule_flush_locked()
+                elif not self._buffer and self._timer is None:
+                    self._schedule_pressure_report_locked()
 
     def probe(self, label: str, data: object | Callable[[], object], opts: Mapping[str, object] | None = None) -> None:
-        with self._lock:
-            if not self._enabled:
-                return
-            options = dict(opts or {})
-            now_ms = int(self._time_provider() * 1000)
-            matching_directives = self._find_matching_probe_directives(label, now_ms)
-            is_heavy = options.get("heavy") is True
-            if is_heavy and not matching_directives:
-                return
-            if label not in self._probe_buffers and len(self._probe_buffers) >= self._max_probe_labels:
-                return
-
-            try:
-                protected_label = sanitize_telemetry(label, self._redact_fields)
-                value = data() if callable(data) else data
-                if not isinstance(value, Mapping):
-                    value = {"value": value}
-                redacted_value = sanitize_telemetry(dict(value), self._redact_fields)
-                if not isinstance(protected_label, str) or not isinstance(redacted_value, dict):
-                    return
-                label = protected_label
-            except Exception:
-                return
-
-            if is_heavy:
-                self._emit_probe_events(label, redacted_value, matching_directives)
-                return
-
-            entry = ProbeEntry(
-                label=label,
-                data=redacted_value,
-                timestamp=iso_now(self._time_provider),
-            )
-            bucket = self._probe_buffers.setdefault(label, deque(maxlen=self._max_probe_entries_per_label))
-            bucket.append(entry)
-            self._emit_probe_events(label, redacted_value, matching_directives)
+        capture_probe(self, label, data, opts)
 
     def capture_exceptions(self) -> None:
+        ensure_current_process(self)
         with self._lock:
             if self._original_excepthook is None:
                 self._original_excepthook = sys.excepthook
@@ -486,6 +581,7 @@ class DebugBundleSdk:
             sys.excepthook = handler
 
     def capture_logging(self, logger: logging.Logger | None = None) -> None:
+        ensure_current_process(self)
         with self._lock:
             target_logger = logger or logging.getLogger()
             logger_id = id(target_logger)
@@ -500,6 +596,7 @@ class DebugBundleSdk:
                 self._optional_logging_restorers = attach_optional_integrations(self, self._on_diagnostic)
 
     def capture_async(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        ensure_current_process(self)
         with self._lock:
             target_loop = loop or asyncio.get_event_loop()
             if target_loop in self._async_handlers:
@@ -517,6 +614,7 @@ class DebugBundleSdk:
             target_loop.set_exception_handler(handler)
 
     def dispose(self) -> None:
+        ensure_current_process(self)
         with self._lock:
             if self._timer is not None:
                 self._timer.cancel()
@@ -544,32 +642,43 @@ class DebugBundleSdk:
         with self._lock:
             if not self._enabled or self._fetch_impl is None:
                 return
-
             request_headers: dict[str, str] = {}
             if self._remote_config_etag is not None:
                 request_headers["if-none-match"] = self._remote_config_etag
+            fetch = self._fetch_impl
+            endpoint = sdk_config_endpoint(self._endpoint)
+            poll_interval = self._configured_probes_poll_interval_ms
+            generation = self._generation
 
-            try:
-                response = self._fetch_impl(
-                    sdk_config_endpoint(self._endpoint),
-                    {
-                        "method": "GET",
-                        "headers": request_headers,
-                    },
-                )
-                status_code = getattr(response, "status_code", None)
-                if status_code == 304:
-                    self._schedule_next_remote_config_refresh()
-                    return
-                if status_code != 200:
-                    raise RuntimeError(f"unexpected config status {status_code}")
-
-                payload = response.json()
+        try:
+            response = fetch(endpoint, {"method": "GET", "headers": request_headers})
+            status_code = getattr(response, "status_code", None)
+            if status_code == 304:
+                snapshot = None
+            elif status_code == 200:
                 snapshot = parse_remote_config(
-                    payload,
-                    self._configured_probes_poll_interval_ms,
+                    response.json(),
+                    poll_interval,
                     int(self._time_provider() * 1000),
                 )
+            else:
+                raise RuntimeError(f"unexpected config status {status_code}")
+            headers = response.headers or {}
+            etag = headers.get("etag")
+            failure: BaseException | None = None
+        except BaseException as error:
+            status_code = None
+            snapshot = None
+            etag = None
+            failure = error
+
+        with self._lock:
+            if generation != self._generation or not self._enabled:
+                return
+            if failure is None and status_code == 304:
+                self._schedule_next_remote_config_refresh()
+                return
+            if failure is None:
                 if snapshot is None:
                     self._emit_diagnostic(
                         "remote_probe_config_invalid",
@@ -582,16 +691,14 @@ class DebugBundleSdk:
 
                 self._remote_config_snapshot = snapshot
                 self._capture_policy = snapshot.capture_policy
-                headers = response.headers or {}
-                etag = headers.get("etag")
                 if isinstance(etag, str) and len(etag) > 0:
                     self._remote_config_etag = etag
                 self._schedule_next_remote_config_refresh()
-            except Exception as error:
+            else:
                 self._emit_diagnostic(
                     "remote_probe_config_failed",
                     "sdk-python failed to refresh remote probe config",
-                    metadata={"error": serialize_error(error)},
+                    metadata={"error": serialize_error(failure) if isinstance(failure, Exception) else "fetch_failed"},
                 )
                 if initial:
                     self._capture_policy = MINIMAL_CAPTURE_POLICY
@@ -646,37 +753,58 @@ class DebugBundleSdk:
         except UnsafeTelemetry:
             return None
 
-    def _enqueue_event(self, event: dict[str, object]) -> None:
+    def _enqueue_event(self, event: dict[str, object]) -> bool:
         protected = self._protect_event(event)
         if protected is None:
-            return
-        self._buffer.append(protected)
-        if len(self._buffer) >= self._batch_size:
-            self.flush()
-            return
-        self._schedule_flush_locked()
+            return False
+        return self._offer_protected_event(protected, self._event_bytes(protected))
+
+    def _offer_protected_event(self, protected: dict[str, object], event_bytes: int) -> bool:
+        if event_bytes > MAX_PENDING_BYTES:
+            self._pressure_drops += 1
+            return False
+        high_priority = high_priority_event(protected)
+        under_pressure = len(self._buffer) >= MAX_PENDING_EVENTS or self._buffer_bytes + event_bytes > MAX_PENDING_BYTES
+        while len(self._buffer) >= MAX_PENDING_EVENTS or self._buffer_bytes + event_bytes > MAX_PENDING_BYTES:
+            if not high_priority or not evict_low_priority(self):
+                self._pressure_drops += 1
+                return False
+        insertion = self._inflight_count
+        if high_priority and (protected.get("event_type") != "request_event" or under_pressure):
+            while insertion < len(self._buffer) and high_priority_event(self._buffer[insertion]):
+                insertion += 1
+            self._buffer.insert(insertion, protected)
+        else:
+            self._buffer.append(protected)
+            self._pending_low_priority += 1
+        self._buffer_bytes += event_bytes
+        self._buffer_sizes[id(protected)] = event_bytes
+        self._schedule_flush_locked(delay=0.0 if len(self._buffer) >= self._batch_size else None)
+        return True
+
+    @staticmethod
+    def _event_bytes(event: dict[str, object]) -> int:
+        return len(json.dumps(event, separators=(",", ":")).encode("utf-8"))
 
     def _schedule_flush_locked(self, delay: float | None = None) -> None:
-        if self._timer is not None:
-            self._timer.cancel()
+        if self._sending:
+            return
         next_delay = self._flush_interval if delay is None else max(delay, 0.0)
+        due_at = time.monotonic() + next_delay
+        if self._timer is not None and self._timer.is_alive():
+            if self._timer_due_at <= due_at:
+                return
+            self._timer.cancel()
         self._timer = threading.Timer(next_delay, self.flush)
         self._timer.daemon = True
+        self._timer_due_at = due_at
         self._timer.start()
 
-    def _append_suppression_aggregates(self) -> None:
-        aggregates = self._suppression.drain_aggregates(self._time_provider())
-        for aggregate in aggregates:
-            event_type = aggregate.get("event_type")
-            payload = aggregate.get("payload")
-            if not isinstance(event_type, str) or not isinstance(payload, dict):
-                continue
-            aggregate.update(self._base_event(event_type, cast(dict[str, object], payload)))
-            prepared = self._apply_before_send_event(aggregate)
-            if prepared is not None:
-                protected = self._protect_event(prepared)
-                if protected is not None:
-                    self._buffer.append(protected)
+    def _schedule_pressure_report_locked(self) -> None:
+        if self._pressure_drops == 0:
+            return
+        delay = max(self._flush_interval, self._last_pressure_report_at + 60.0 - self._time_provider())
+        self._schedule_flush_locked(delay=delay)
 
     def _apply_before_send_event(self, event: dict[str, object]) -> dict[str, object] | None:
         protected = self._protect_event(event)
@@ -712,60 +840,15 @@ class DebugBundleSdk:
         policy_threshold = self._capture_policy.capture_logs
         return self._log_level if LEVEL_RANKS[self._log_level] >= LEVEL_RANKS[policy_threshold] else policy_threshold
 
-    def _should_capture_request_event(
-        self,
-        request: Mapping[str, object] | None,
-        response: Mapping[str, object] | None,
-    ) -> bool:
-        policy = self._capture_policy.capture_request_events
-        status_code = None
-        if response is not None:
-            candidate = response.get("status_code") or response.get("response_status")
-            if isinstance(candidate, int):
-                status_code = candidate
-        request_path = None
-        http_method = None
-        if request is not None:
-            path_candidate = request.get("path") or request.get("url")
-            method_candidate = request.get("method")
-            request_path = path_candidate if isinstance(path_candidate, str) else None
-            http_method = method_candidate if isinstance(method_candidate, str) else None
-        if is_immediate_request_incident_status(
-            status_code,
-            self._capture_policy.preset,
-            self._capture_policy.immediate_client_error_statuses,
-            request_path,
-            http_method,
-            self._capture_policy.immediate_client_error_path_rules,
-        ):
-            return True
-        if policy == "off":
-            return False
-        if policy == "all":
-            return True
-        if response is None:
-            return policy == "filtered"
-        if status_code is None:
-            return policy == "filtered"
-        if policy == "failures_only":
-            return status_code >= 500
-        if policy == "filtered":
-            return False
-        return True
-
-    def _emit_probe_events(self, label: str, data: dict[str, object], directives: list[RemoteProbeDirective]) -> None:
-        for directive in directives:
-            payload = {
-                "label": label,
-                "activation_id": getattr(directive, "id"),
-                "probe_label_pattern": getattr(directive, "label_pattern"),
-                "data": dict(data),
-            }
-            event = self._apply_before_send_event(self._base_event("probe_event", payload))
-            if event is not None and self._capture_policy.capture_probe_events == "standalone_when_activated":
-                self._enqueue_event(event)
+    def _log_level_eligible(self, level: str) -> bool:
+        return (
+            self._enabled
+            and self._capture_policy.capture_logs != "off"
+            and level_enabled(normalize_level(level), self._effective_log_threshold())
+        )
 
     def begin_request(self, request: dict[str, Any]) -> Token[list[RemoteProbeDirective] | None]:
+        ensure_current_process(self)
         trigger_token_key = (
             self._remote_config_snapshot.trigger_token_key if self._remote_config_snapshot is not None else None
         )

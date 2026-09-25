@@ -10,6 +10,8 @@ Use this package to capture Python backend exceptions, request metadata, structu
 
 Requires Python 3.10 or newer.
 
+Version 2.0.0 protects capture callers with bounded, priority-aware background delivery. Review the [2.0 migration guide](MIGRATION-2.0.md) before upgrading from 1.x.
+
 ## Automatic capture and application filtering
 
 `capture_logging()` attaches the stdlib logging handler and detects installed structlog/loguru integrations. Obtain structlog loggers after attachment. Structlog level filters and `DropEvent` processors run before capture; stdlib-backed structlog loggers also honor logger filters, disabled state and `logging.disable()`. Bound context and async logging are supported. SDK disposal stops capture through cached proxies. DebugBundle has its own minimum capture level; destination-specific filters on other handlers or Loguru sinks do not configure the DebugBundle handler.
@@ -58,6 +60,7 @@ debugbundle.capture_log("payment retry failed", level="warning", context={"order
 debugbundle.capture_message("worker started")
 debugbundle.probe("checkout.cart", {"item_count": len(cart.items)})
 
+# Use only during controlled teardown or tests, never on a request path.
 debugbundle.flush()
 ```
 
@@ -242,8 +245,10 @@ Post-V1 planned expansions from `spec/sdk-language-targets.md` remain out of sco
 ## Safety Defaults
 
 - SDK failures are caught internally and do not crash the host process.
+- A forked worker starts with a fresh SDK queue, lock, context and built-in HTTP client. Initialize the SDK in each child when remote configuration must poll there; custom transports must be fork-safe.
 - Sensitive fields are redacted before transport.
 - Duplicate event storms are suppressed locally.
+- Full-queue capture sheds warning/request noise before context scans. Exceptions, ERROR logs, and 5xx request incidents have priority over pending lower-priority events; all-error overloads are bounded and summarized.
 - Runtime context excludes environment variables.
 - Browser relay requests cannot smuggle server-side credentials.
 

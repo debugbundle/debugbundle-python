@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-25
+
+### Breaking changes
+
+- Reject logs below the effective threshold before event construction and `before_send`; admitted hooks run on the delivery path after sampling and duplicate suppression. Review [the 2.0 migration guide](MIGRATION-2.0.md) before upgrading from 1.x.
+- Reaching the batch size now schedules background transport. Pending events and suppression fingerprints have finite bounds; queue pressure may discard events and produces a bounded aggregate when delivery permits.
+- Initial remote configuration is fetched asynchronously. Capture uses a restrictive local policy until the response arrives.
+- A forked child discards inherited pending events, request context, probes, timers, and sender ownership before using the SDK; it keeps the effective capture policy and creates a fresh HTTP client.
+- Full queues reject lower-priority logs and requests before context scanning. Exceptions, ERROR logs, and 5xx request incidents can displace pending lower-priority events; an all-error overload still drops promptly within the same finite budget.
+- A pressure-summary event that cannot fit in a full queue no longer increments the application-event drop count; the aggregate is sent once capacity returns.
+
+### Safety
+
+- Read exception arguments, traceback, and cause through built-in descriptors, preserving original evidence without running blocking application metadata or metaclass accessors on capture callers.
+
+- Keep transport calls outside the capture lock, use bounded retry ownership, and avoid application-defined exception and stdlib logging renderers in automatic capture.
+- Run probe suppliers, mapping traversal, privacy protection, and probe-event preparation outside the shared capture lock; a slow probe can no longer make a concurrent exception lose admission. Recheck activation and SDK generation before committing buffered or standalone probe data.
+- Finalize valid hook replacements incrementally against policy and byte ownership. Drop an over-budget replacement instead of restoring pre-hook application content; replacement event IDs cannot merge retained-size accounting.
+- Cache bounded event byte sizes at admission and prepare post-hook sizes outside the capture lock. Queue eviction and acknowledgement/retry accounting no longer serialize retained payloads while holding that lock.
+- Prepare suppression and queue-pressure summaries outside the capture lock; concurrent exceptions remain admissible while a summary is privacy-scanned. Reconfiguration rejects summaries from the previous SDK generation, and pressure drops that arrive during preparation remain counted for a later report.
+- Schedule one later pressure-summary send after a full queue drains, even if no further application event arrives.
+
 ## [1.5.0] - 2026-09-21
 
 ### Security

@@ -61,6 +61,31 @@ def test_capture_logging_registers_handler_and_respects_log_level() -> None:
     assert events[0]["payload"]["message"] == "keep warning"
 
 
+def test_logging_handler_never_invokes_hostile_argument_renderer() -> None:
+    class HostileArgument:
+        def __str__(self) -> str:
+            raise AssertionError("application formatter must not run")
+
+    transport = FakeTransport()
+    sdk = DebugBundleSdk(transport=transport)
+    sdk.init(project_token="dbundle_proj_test", service="checkout-api")
+    logger = logging.getLogger("debugbundle-python-hostile-formatter")
+    logger.setLevel(logging.INFO)
+    previous_propagate = logger.propagate
+    logger.propagate = False
+    sdk.capture_logging(logger)
+    try:
+        logger.info("ignored %s", HostileArgument())
+        logger.error("kept %s", HostileArgument())
+        sdk.flush()
+        events = transport.calls[0]["events"]
+        assert len(events) == 1
+        assert events[0]["payload"]["message"] == "kept [unsupported argument]"
+    finally:
+        sdk.dispose()
+        logger.propagate = previous_propagate
+
+
 def test_capture_async_registers_loop_handler() -> None:
     transport = FakeTransport()
     sdk = DebugBundleSdk(transport=transport)

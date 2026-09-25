@@ -83,6 +83,7 @@ def test_remote_config_skips_recurring_polling_when_remote_probes_are_disabled()
         fetch_impl=fetch,
         probes_poll_interval=15000,
     )
+    assert sdk._initial_config_ready.wait(timeout=2)
 
     assert len(fetch.calls) == 1
     assert fetch.calls[0][0] == "https://api.debugbundle.com/v1/sdk/config"
@@ -130,6 +131,7 @@ def test_remote_config_uses_etag_and_activates_heavy_probes_only_while_directive
         fetch_impl=fetch,
         probes_poll_interval=60000,
     )
+    assert sdk._initial_config_ready.wait(timeout=2)
 
     invoked = {"count": 0}
 
@@ -172,6 +174,7 @@ def test_failed_init_config_fetch_falls_back_to_minimal_policy() -> None:
         fetch_impl=fetch,
         probes_poll_interval=25000,
     )
+    assert sdk._initial_config_ready.wait(timeout=2)
 
     sdk.capture_message("warning blocked", level="warning")
     sdk.capture_message("error still allowed", level="error")
@@ -216,6 +219,7 @@ def test_capture_policy_filters_logs_and_request_events_from_remote_config() -> 
         environment="production",
         fetch_impl=fetch,
     )
+    assert sdk._initial_config_ready.wait(timeout=2)
 
     sdk.capture_message("warning blocked", level="warning")
     sdk.capture_message("error kept", level="error")
@@ -259,6 +263,7 @@ def test_balanced_capture_policy_keeps_immediate_failures_but_not_unconfigured_4
         environment="production",
         fetch_impl=fetch,
     )
+    assert sdk._initial_config_ready.wait(timeout=2)
 
     sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 429})
     sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 404})
@@ -307,6 +312,7 @@ def test_capture_policy_promotes_configured_client_error_path_rules_when_request
         environment="production",
         fetch_impl=fetch,
     )
+    assert sdk._initial_config_ready.wait(timeout=2)
 
     sdk.capture_request({"method": "POST", "path": "/checkout/cart", "headers": {}}, {"status_code": 404})
     sdk.capture_request({"method": "GET", "path": "/checkout/cart", "headers": {}}, {"status_code": 404})
@@ -350,6 +356,7 @@ def test_investigative_capture_policy_promotes_409_even_when_request_capture_is_
         environment="production",
         fetch_impl=fetch,
     )
+    assert sdk._initial_config_ready.wait(timeout=2)
 
     sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 409})
     sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 404})
@@ -390,6 +397,7 @@ def test_capture_policy_promotes_configured_client_error_statuses_when_request_c
         environment="production",
         fetch_impl=fetch,
     )
+    assert sdk._initial_config_ready.wait(timeout=2)
 
     sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 403})
     sdk.capture_request({"method": "POST", "path": "/checkout", "headers": {}}, {"status_code": 404})

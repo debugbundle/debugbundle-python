@@ -19,3 +19,7 @@ check-docker:
 smoke:
 	$(PYTHON) -m build
 	$(PYTHON) smoke/run_app_driven_smoke.py --wheel "$(WHEEL_PATH)"
+
+.PHONY: smoke-docker
+smoke-docker:
+	$(DOCKER_RUN) python smoke/run_app_driven_smoke.py --wheel "$(WHEEL_PATH)"

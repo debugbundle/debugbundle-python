@@ -74,6 +74,7 @@ def test_emitted_python_sdk_events_validate_against_vendored_event_envelope_sche
             )
         ),
     )
+    assert sdk._initial_config_ready.wait(timeout=2)
 
     sdk.probe("checkout.tax", {"rate": 0.2})
     sdk.probe("checkout.deep-tax", {"region": "us-east-1"}, opts={"heavy": True})

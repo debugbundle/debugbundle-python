@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from hashlib import sha256
 
@@ -9,6 +10,7 @@ LOOP_THRESHOLD = 10
 LOOP_RESET_AFTER_SECONDS = 60.0
 LOOP_CHECKPOINT_SECONDS = 30.0
 MAX_NORMAL_EVENTS_PER_WINDOW = 3
+MAX_TRACKED_FINGERPRINTS = 2_048
 
 
 @dataclass
@@ -27,25 +29,30 @@ class SuppressionState:
 
 class EventSuppressionTracker:
     def __init__(self) -> None:
-        self._states: dict[str, SuppressionState] = {}
+        self._states: OrderedDict[str, SuppressionState] = OrderedDict()
 
     def should_capture(self, key: str, now: float) -> bool:
-        state = self._states.get(key)
+        fingerprint = sha256(key.encode("utf-8")).hexdigest()
+        state = self._states.get(fingerprint)
         if state is None:
+            if len(self._states) >= MAX_TRACKED_FINGERPRINTS:
+                self._states.popitem(last=False)
             state = SuppressionState(
                 window_started_at=now,
                 loop_window_started_at=now,
                 last_seen_at=now,
             )
-            self._states[key] = state
+            self._states[fingerprint] = state
+        else:
+            self._states.move_to_end(fingerprint)
 
         if state.suppression_mode and now - state.last_seen_at >= LOOP_RESET_AFTER_SECONDS:
-            self._states[key] = SuppressionState(
+            self._states[fingerprint] = SuppressionState(
                 window_started_at=now,
                 loop_window_started_at=now,
                 last_seen_at=now,
             )
-            state = self._states[key]
+            state = self._states[fingerprint]
 
         if now - state.window_started_at >= DUPLICATE_WINDOW_SECONDS:
             state.window_started_at = now
@@ -94,7 +101,7 @@ class EventSuppressionTracker:
                 {
                     "event_type": "error_suppressed",
                     "payload": {
-                        "fingerprint": sha256(key.encode("utf-8")).hexdigest(),
+                        "fingerprint": key,
                         "suppressed_count": state.pending_suppressed_count,
                         "first_seen": _to_iso(state.pending_first_seen_at),
                         "last_seen": _to_iso(state.pending_last_seen_at),
