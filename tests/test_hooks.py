@@ -204,8 +204,17 @@ def test_capture_request_is_thread_safe_under_concurrent_writers() -> None:
     sdk.dispose()
 
     events = transport.calls[0]["events"]
-    assert len(events) == worker_count * events_per_worker
-    assert len({event["payload"]["path"] for event in events}) == worker_count * events_per_worker
+    requests = [event for event in events if event["event_type"] == "request_event"]
+    pressure = [
+        event for event in events
+        if event["event_type"] == "log_event"
+        and event["payload"]["attributes"].get("reason") == "queue_pressure"
+    ]
+    assert len(pressure) <= 1
+    assert len(requests) + sum(event["payload"]["attributes"]["suppressed_count"] for event in pressure) == (
+        worker_count * events_per_worker
+    )
+    assert len({event["payload"]["path"] for event in requests}) == len(requests)
 
 
 def test_module_level_logger_helpers_cover_optional_branches(monkeypatch) -> None:
