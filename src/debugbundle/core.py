@@ -61,7 +61,7 @@ from .redaction import (
 )
 from .request_capture_policy import should_capture_request_event
 from .suppression import EventSuppressionTracker
-from .transport import HttpTransport, Transport, coerce_transport_response
+from .transport import HttpTransport, Transport, bounded_retry_after_ms, coerce_transport_response
 from .trigger_token import resolve_request_trigger_directives
 
 DEFAULT_BATCH_SIZE = 25
@@ -499,11 +499,13 @@ class DebugBundleSdk:
                     return
 
                 if 200 <= response.status_code < 300:
-                    acknowledgement = decide_acknowledgement(response.body, len(batch))
+                    acknowledgement = decide_acknowledgement(
+                        response.body, len(batch), isinstance(transport, HttpTransport)
+                    )
                     if acknowledgement.kind == "protocol_failure":
                         self._consecutive_failures += 1
-                        retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
-                        self._retry_after = now + (retry_after_ms / 1000)
+                        retry_after_ms = bounded_retry_after_ms(response.retry_after_ms)
+                        self._retry_after = self._time_provider() + (retry_after_ms / 1000)
                         self._emit_diagnostic(
                             "ingestion_acknowledgement_invalid",
                             "sdk-python retained a batch after an invalid ingestion acknowledgement",
@@ -535,8 +537,8 @@ class DebugBundleSdk:
                         self._last_event_at = self._time_provider() * 1000
                     if acknowledgement.retryable_indices:
                         self._consecutive_failures += 1
-                        retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
-                        self._retry_after = now + (retry_after_ms / 1000)
+                        retry_after_ms = bounded_retry_after_ms(response.retry_after_ms)
+                        self._retry_after = self._time_provider() + (retry_after_ms / 1000)
                         self._schedule_flush_locked(delay=retry_after_ms / 1000)
                         return
                     self._retry_after = 0.0
@@ -544,9 +546,9 @@ class DebugBundleSdk:
                     return
 
                 self._consecutive_failures += 1
-                if response.status_code == 429:
-                    retry_after_ms = response.retry_after_ms if response.retry_after_ms is not None else 1_000
-                    self._retry_after = now + (retry_after_ms / 1000)
+                if response.status_code == 429 or (response.status_code >= 500 and response.retry_after_ms is not None):
+                    retry_after_ms = bounded_retry_after_ms(response.retry_after_ms)
+                    self._retry_after = self._time_provider() + (retry_after_ms / 1000)
                     self._schedule_flush_locked(delay=retry_after_ms / 1000)
                     return
                 if 400 <= response.status_code < 500:

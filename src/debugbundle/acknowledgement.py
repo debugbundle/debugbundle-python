@@ -19,8 +19,10 @@ class AcknowledgementDecision:
     reason: str | None = None
 
 
-def decide_acknowledgement(body: object | None, batch_length: int) -> AcknowledgementDecision:
+def decide_acknowledgement(body: object | None, batch_length: int, required: bool = False) -> AcknowledgementDecision:
     if not isinstance(body, dict) or not any(key in body for key in ("accepted", "rejected", "errors")):
+        if required:
+            return AcknowledgementDecision(kind="protocol_failure", reason="missing_acknowledgement")
         return AcknowledgementDecision(kind="legacy")
 
     accepted = body.get("accepted")

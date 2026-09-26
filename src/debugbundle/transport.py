@@ -1,10 +1,39 @@
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 
 import httpx
+
+MAX_RETRY_AFTER_MS = 300_000
+
+
+def bounded_retry_after_ms(value: object, default: int = 1_000) -> int:
+    # Clamp before conversion so arbitrarily large integer hints cannot overflow a float deadline.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    if isinstance(value, float) and not math.isfinite(value):
+        return default
+    return int(min(MAX_RETRY_AFTER_MS, max(0, value)))
+
+
+def _parse_retry_after(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            seconds = parsedate_to_datetime(value).timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError):
+            return None
+    if not math.isfinite(seconds):
+        return None
+    return bounded_retry_after_ms(min(300, max(0, seconds)) * 1_000)
 
 
 @dataclass
@@ -34,13 +63,7 @@ class HttpTransport:
             json={"events": request["events"]},
             headers=headers,
         )
-        retry_after_header = response.headers.get("retry-after")
-        retry_after_ms = None
-        if retry_after_header is not None:
-            try:
-                retry_after_ms = int(float(retry_after_header) * 1000)
-            except ValueError:
-                retry_after_ms = None
+        retry_after_ms = _parse_retry_after(response.headers.get("retry-after"))
 
         try:
             body: object | None = response.json()

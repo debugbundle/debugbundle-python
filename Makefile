@@ -11,6 +11,10 @@ install-docker:
 test-focused:
 	$(DOCKER_RUN) .venv-docker/bin/pytest $(TEST_FILES)
 
+.PHONY: format-transport-tests
+format-transport-tests:
+	$(DOCKER_RUN) .venv-docker/bin/ruff format tests/test_transport_reliability.py
+
 check-docker:
 	$(DOCKER_RUN) sh -c '.venv-docker/bin/ruff check . && .venv-docker/bin/mypy src && .venv-docker/bin/pytest --cov=src/debugbundle --cov-report=term-missing --cov-report=json:coverage.json -q && .venv-docker/bin/python scripts/check_coverage.py coverage.json && .venv-docker/bin/python -m build'
 
