@@ -23,7 +23,7 @@ MANDATORY_FIELDS = DEFAULT_REDACT_FIELDS | {
 }
 _HEADER = re.compile(r"\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]*", re.I)
 _BEARER = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]{6,}", re.I)
-_TOKEN = re.compile(r"\bdbundle_(?:proj|mem|probe|agent)_[A-Za-z0-9_-]+\b")
+_TOKEN = re.compile(r"\bdbundle_(?:proj|mem|probe|agent|anl|anr|ah)_[A-Za-z0-9_-]+\b")
 _PEM = re.compile(
     r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
     re.I,

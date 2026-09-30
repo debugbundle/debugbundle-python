@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Protect reserved analytics writer, relay-writer and one-time handoff credentials with mandatory telemetry redaction before retention. This does not enable semantic analytics collection.
+
 ## [2.0.1] - 2026-09-26
 
 ### Fixed
