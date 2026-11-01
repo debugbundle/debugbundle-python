@@ -320,7 +320,15 @@ def test_connected_durable_mode_marks_spool_file_delivered_after_forward_success
 
     def forward_transport(request: dict[str, object]) -> object:
         forwarded.append(request)
-        return type("Response", (), {"status_code": 202, "retry_after_ms": None})()
+        return type(
+            "Response",
+            (),
+            {
+                "status_code": 202,
+                "retry_after_ms": None,
+                "body": {"accepted": len(request["events"]), "rejected": 0, "errors": []},
+            },
+        )()
 
     handler = BrowserRelayHandler(
         allowed_origins=["https://example.com"],

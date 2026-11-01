@@ -5,6 +5,22 @@ from debugbundle.core import DebugBundleSdk
 from debugbundle.exception_snapshot import exception_details
 
 
+def test_unsupported_argument_types_do_not_invoke_metaclass_equality() -> None:
+    calls: list[str] = []
+
+    class UnsafeType(type):
+        def __eq__(cls, other: object) -> bool:
+            calls.append("type equality")
+            raise AssertionError("must not invoke application metaclass equality")
+
+    class Unsupported(metaclass=UnsafeType):
+        pass
+
+    _, message, _ = exception_details(RuntimeError(Unsupported()))
+    assert calls == []
+    assert message == "[unsupported argument]"
+
+
 def test_public_capture_bypasses_blocked_exception_metadata_and_preserves_real_traceback() -> None:
     release = threading.Event()
     accessor_calls: list[str] = []

@@ -15,6 +15,10 @@ test-focused:
 format-transport-tests:
 	$(DOCKER_RUN) .venv-docker/bin/ruff format tests/test_transport_reliability.py
 
+.PHONY: format-focused
+format-focused:
+	$(DOCKER_RUN) sh -c '.venv-docker/bin/ruff check --select I --fix $(FORMAT_FILES) && .venv-docker/bin/ruff format $(FORMAT_FILES)'
+
 check-docker:
 	$(DOCKER_RUN) sh -c '.venv-docker/bin/ruff check . && .venv-docker/bin/mypy src && .venv-docker/bin/pytest --cov=src/debugbundle --cov-report=term-missing --cov-report=json:coverage.json -q && .venv-docker/bin/python scripts/check_coverage.py coverage.json && .venv-docker/bin/python -m build'
 
@@ -27,3 +31,11 @@ smoke:
 .PHONY: smoke-docker
 smoke-docker:
 	$(DOCKER_RUN) python smoke/run_app_driven_smoke.py --wheel "$(WHEEL_PATH)"
+
+.PHONY: native-runtime-docker
+native-runtime-docker:
+	docker run --rm --mount "type=bind,source=$(CURDIR),target=/workspace,readonly" -w /workspace $(PYTHON_IMAGE) sh -c 'python --version && python smoke/run_app_driven_smoke.py --wheel "$(WHEEL_PATH)"'
+
+.PHONY: evidence-performance
+evidence-performance:
+	docker run --rm --network none -v "$(CURDIR):/workspace:ro" -w /workspace -e PYTHONPATH=/workspace/src $(PYTHON_IMAGE) .venv-docker/bin/python perf/evidence_capture.py

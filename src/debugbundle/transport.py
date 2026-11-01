@@ -9,6 +9,9 @@ from typing import Any, Protocol
 
 import httpx
 
+from .evidence_http import bounded_response_json, evidence_url
+from .ingestion_wire import MAX_BODY_BYTES, encode_body
+
 MAX_RETRY_AFTER_MS = 300_000
 
 
@@ -44,8 +47,7 @@ class TransportResponse:
 
 
 class Transport(Protocol):
-    def __call__(self, request: Mapping[str, object]) -> TransportResponse:
-        ...
+    def __call__(self, request: Mapping[str, object]) -> TransportResponse: ...
 
 
 class HttpTransport:
@@ -54,22 +56,26 @@ class HttpTransport:
         self._client = httpx.Client(timeout=5.0)
 
     def __call__(self, request: Mapping[str, object]) -> TransportResponse:
+        return self.send_until(request, time.monotonic() + 5.0)
+
+    def send_until(self, request: Mapping[str, object], deadline: float) -> TransportResponse:
+        remaining = min(5.0, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("ingestion deadline exhausted")
+        body_bytes = encode_body(request["events"])
+        if len(body_bytes) > MAX_BODY_BYTES:
+            raise ValueError("ingestion request exceeds byte limit")
         headers = {
             "authorization": f"Bearer {request['project_token']}",
             "content-type": "application/json",
+            "accept-encoding": "identity",
         }
-        response = self._client.post(
-            self._endpoint,
-            json={"events": request["events"]},
-            headers=headers,
-        )
-        retry_after_ms = _parse_retry_after(response.headers.get("retry-after"))
-
-        try:
-            body: object | None = response.json()
-        except (ValueError, TypeError):
-            body = None
-        return TransportResponse(status_code=response.status_code, retry_after_ms=retry_after_ms, body=body)
+        with self._client.stream(
+            "POST", evidence_url(self._endpoint), content=body_bytes, headers=headers, timeout=remaining
+        ) as response:
+            retry_after_ms = _parse_retry_after(response.headers.get("retry-after"))
+            body = bounded_response_json(response, deadline)
+            return TransportResponse(status_code=response.status_code, retry_after_ms=retry_after_ms, body=body)
 
     def close(self) -> None:
         self._client.close()

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- Validate complete canonical hook envelopes using a vendored runtime schema;
+  own native JSON replacements and revalidate after mandatory privacy. Withhold
+  exhausted/unfit valid replacements without restoring pre-hook content.
+- Bound native HTTP batches by final JSON bytes, retaining charged finalized
+  tails without repeated hooks. Relay forwarding includes server credentials in
+  byte accounting and shares one deadline across chunks. Only complete canonical
+  ACKs create exclusive private spool markers; legacy custom success stays valid.
+
+- Add verified-path optional native exception graphs, bounded uncaught evidence,
+  monotonic operation contexts and explicitly opted-in recovery observations.
+- Revoke completed/reinitialised request context copied into async work; preserve
+  canonical hook identity/type replacements and bounded diagnostic ownership.
+- Negotiate evidence on existing traffic, bound native acknowledgement reads and
+  retry a rejected stripped original once after negotiated support loss.
+
 ## [2.0.1] - 2026-09-26
 
 ### Fixed

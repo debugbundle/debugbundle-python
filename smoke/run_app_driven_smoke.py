@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import version
@@ -36,6 +37,7 @@ class RecordedRequest:
 class MockIngestionServer:
     def __init__(self) -> None:
         self.requests: list[RecordedRequest] = []
+        self.evidence_capabilities: dict[str, Any] | None = None
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -72,9 +74,10 @@ class MockIngestionServer:
                 self.send_header("content-type", "application/json")
                 self.end_headers()
                 event_count = len(parsed_body.get("events", []))
-                self.wfile.write(
-                    json.dumps({"accepted": event_count, "rejected": 0, "errors": []}).encode("utf-8")
-                )
+                acknowledgement = {"accepted": event_count, "rejected": 0, "errors": []}
+                if outer.evidence_capabilities is not None:
+                    acknowledgement["evidence_capabilities"] = outer.evidence_capabilities
+                self.wfile.write(json.dumps(acknowledgement).encode("utf-8"))
 
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
                 return
@@ -217,10 +220,126 @@ def _run_installed_fork_smoke() -> None:
         sdk.dispose()
 
 
+def _run_installed_evidence_smoke(schema_path: Path) -> None:
+    from jsonschema.validators import validator_for
+
+    from debugbundle import DebugBundleSdk
+    from debugbundle.before_send import _is_valid_event
+
+    # The installed runtime must carry its accepting schema; repository import
+    # paths and dev-only jsonschema cannot substitute for this hook boundary.
+    corpus = json.loads(schema_path.with_name("evidence-wire-cases.json").read_text())
+    for fixture in corpus["events"]:
+        if _is_valid_event(fixture["event"]) != fixture["valid"]:
+            raise AssertionError(f"Installed canonical hook mismatch: {fixture['id']}")
+
+    hook_ids = []
+
+    def hook(event):
+        hook_ids.append(event["event_id"])
+        event.setdefault("context", {})["installed_hook"] = "accepted"
+        return event
+
+    server = MockIngestionServer()
+    server.evidence_capabilities = {
+        "version": 1,
+        "features": ["exception_evidence_v1", "resource_observations_v1", "recovery_v1", "evidence_provenance_v1"],
+    }
+    server.start()
+    sdk = DebugBundleSdk()
+    sdk.init(
+        PROJECT_TOKEN,
+        service="candidate-evidence",
+        endpoint=server.endpoint,
+        batch_size=1000,
+        flush_interval=3600,
+        capture_recovery_observations=True,
+        before_send=hook,
+    )
+    try:
+        sdk.capture_message("existing-traffic discovery", "error")
+        sdk.flush()
+        failure_ref, attempt = str(uuid.uuid4()), str(uuid.uuid4())
+        with sdk.operation_context({"kind": "job", "name": "qualification.calculate", "limit_ms": 5000}):
+            try:
+                try:
+                    raise ValueError("native cause")
+                except ValueError as cause:
+                    raise RuntimeError("native outer") from cause
+            except RuntimeError as error:
+                sdk.capture_exception(error, {"failure_ref": failure_ref})
+            for state in ("attempt_completed", "recovery_observed"):
+                sdk.capture_recovery({"failure_ref": failure_ref, "attempt_id": attempt, "state": state})
+        sdk.flush()
+        events = [event for request in server.requests for event in request.body["events"]]
+        failure = next(event for event in events if event["event_type"] == "backend_exception")
+        if failure["context"].get("installed_hook") != "accepted" or failure["event_id"] not in hook_ids:
+            raise AssertionError("Installed canonical hook result was lost")
+        graph = failure["payload"]["exception_evidence"]
+        if [node["name"] for node in graph["nodes"]] != ["RuntimeError", "ValueError"]:
+            raise AssertionError("Installed native cause chain was not retained")
+        if not all(node["frames"] for node in graph["nodes"]):
+            raise AssertionError("Installed native traceback frames were lost")
+        if failure["payload"]["execution"]["kind"] != "job":
+            raise AssertionError("Installed operation ownership was lost")
+        observations = [event for event in events if event["event_type"] == "diagnostic_context"]
+        if [event["payload"]["state"] for event in observations] != ["attempt_completed", "recovery_observed"]:
+            raise AssertionError("Installed explicit observations were lost or inferred")
+        scope = failure["context"]["evidence_reference"]["scope"]
+        if any(event["payload"]["scope"] != scope for event in observations):
+            raise AssertionError("Installed failure/recovery operation scopes diverged")
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        validator_class = validator_for(schema)
+        validator_class.check_schema(schema)
+        validator = validator_class(schema, format_checker=validator_class.FORMAT_CHECKER)
+        for event in events:
+            validator.validate(event)
+        from debugbundle.relay import BrowserRelayHandler
+
+        relay = BrowserRelayHandler(
+            project_mode="connected", project_token=PROJECT_TOKEN, endpoint=server.endpoint, durable_write=False
+        )
+        frontend = next(
+            fixture["event"]
+            for fixture in corpus["events"]
+            if fixture["valid"]
+            and fixture["event"]["event_type"] == "frontend_exception"
+            and "exception_evidence" in fixture["event"]["payload"]
+        )
+        before_relay = len(server.requests)
+        for _ in range(2):
+            frontend["event_id"] = str(uuid.uuid4())
+            reply = relay.handle(
+                {
+                    "method": "POST",
+                    "url": "/relay?debugbundle_evidence=1",
+                    "headers": {
+                        "host": "app.example",
+                        "origin": "https://app.example",
+                        "content-type": "application/json",
+                    },
+                    "body": json.dumps({"batch": [frontend]}),
+                }
+            )
+            if reply.status != 202 or reply.body["evidence_capabilities"] != server.evidence_capabilities:
+                raise AssertionError("Installed native relay failed to acquire verified proof")
+        relay_requests = server.requests[before_relay:]
+        if len(relay_requests) != 2 or "exception_evidence" in relay_requests[0].body["events"][0]["payload"]:
+            raise AssertionError("Installed unknown relay emitted unsupported metadata")
+        if "exception_evidence" not in relay_requests[1].body["events"][0]["payload"]:
+            raise AssertionError("Installed relay failed to retain learned support")
+        if any(request.path != "/v1/events?debugbundle_evidence=1" for request in server.requests):
+            raise AssertionError("Installed discovery added or changed the ingestion route")
+    finally:
+        sdk.dispose()
+        server.close()
+
+
 def _run_installed_smoke(schema_path: Path) -> None:
     _run_installed_fork_smoke()
+    _run_installed_evidence_smoke(schema_path)
     from flask import Flask, jsonify
-    from jsonschema import Draft202012Validator
+    from jsonschema.validators import validator_for
 
     import debugbundle
     from debugbundle import create_flask_relay_handler, instrument_flask
@@ -239,11 +358,13 @@ def _run_installed_smoke(schema_path: Path) -> None:
     app = Flask(__name__)
     app.config["TESTING"] = True
     instrument_flask(app)
+    spool = tempfile.TemporaryDirectory(prefix="debugbundle-installed-spool-")
     create_flask_relay_handler(
         allowed_origins=["https://app.example.com"],
         project_mode="connected",
         project_token=PROJECT_TOKEN,
         endpoint=server.endpoint,
+        spool_dir=spool.name,
     )(app)
 
     @app.get("/smoke")
@@ -299,10 +420,13 @@ def _run_installed_smoke(schema_path: Path) -> None:
         )
         if relay_response.status_code != 202:
             raise AssertionError(f"Unexpected relay status: {relay_response.status_code}")
+        if not list(Path(spool.name).glob("*.delivered")):
+            raise AssertionError("Installed relay did not retain its successful spool delivery marker")
 
         debugbundle.flush()
     finally:
         server.close()
+        spool.cleanup()
 
     if len(server.requests) < 2:
         raise AssertionError(f"Expected at least 2 ingestion requests, got {len(server.requests)}")
@@ -311,7 +435,9 @@ def _run_installed_smoke(schema_path: Path) -> None:
         raise AssertionError("Installed SDK leaked the privacy canary.")
 
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    validator = Draft202012Validator(schema)
+    validator_class = validator_for(schema)
+    validator_class.check_schema(schema)
+    validator = validator_class(schema, format_checker=validator_class.FORMAT_CHECKER)
     sdk_version = version("debugbundle-python")
 
     backend_request, log_event = _find_event(
@@ -319,7 +445,7 @@ def _run_installed_smoke(schema_path: Path) -> None:
         lambda event: event.get("event_type") == "log_event"
         and event.get("payload", {}).get("message") == "python app-driven smoke message",
     )
-    if backend_request.path != "/v1/events":
+    if backend_request.path != "/v1/events?debugbundle_evidence=1":
         raise AssertionError(f"Unexpected backend request path: {backend_request.path}")
     if backend_request.headers.get("authorization") != f"Bearer {PROJECT_TOKEN}":
         raise AssertionError("Backend capture did not use the server-side project token.")
@@ -355,7 +481,7 @@ def _run_installed_smoke(schema_path: Path) -> None:
         lambda event: event.get("event_type") == "frontend_exception"
         and event.get("sdk_name") == "@debugbundle/sdk-browser",
     )
-    if relay_request.path != "/v1/events":
+    if relay_request.path != "/v1/events?debugbundle_evidence=1":
         raise AssertionError(f"Unexpected relay request path: {relay_request.path}")
     if relay_request.headers.get("authorization") != f"Bearer {PROJECT_TOKEN}":
         raise AssertionError("Relay forwarding did not use the server-side project token.")
@@ -405,4 +531,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        # The installed SDK owns sys.excepthook during qualification; keep smoke
+        # assertion failures visible without changing application hook behavior.
+        sys.__excepthook__(type(error), error, error.__traceback__)
+        raise SystemExit(1) from None

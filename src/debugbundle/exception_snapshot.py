@@ -65,7 +65,7 @@ def _safe_message(error: BaseException) -> str:
         for value in args[:4]:
             if issubclass(type(value), str):
                 parts.append(str.__getitem__(value, slice(0, 1024)))
-            elif type(value) in (int, float, bool):
+            elif type(value) is int or type(value) is float or type(value) is bool:
                 parts.append(str(value))
             else:
                 parts.append("[unsupported argument]")

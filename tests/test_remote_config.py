@@ -5,6 +5,18 @@ from dataclasses import dataclass
 from debugbundle.core import DebugBundleSdk
 
 
+def test_invalid_config_cannot_grant_evidence_capabilities() -> None:
+    capabilities = {"version": 1, "features": ["exception_evidence_v1"]}
+    fetch = FakeFetch([FakeConfigResponse(200, {"capture_policy": "invalid", "evidence_capabilities": capabilities})])
+    sdk = DebugBundleSdk(transport=FakeTransport())
+    try:
+        sdk.init("dbundle_proj_test", fetch_impl=fetch, evidence_capabilities=capabilities)
+        assert sdk._initial_config_ready.wait(timeout=2)
+        assert not sdk._evidence.supports("exception_evidence_v1")
+    finally:
+        sdk.dispose()
+
+
 @dataclass
 class FakeTransportResponse:
     status_code: int
@@ -86,8 +98,9 @@ def test_remote_config_skips_recurring_polling_when_remote_probes_are_disabled()
     assert sdk._initial_config_ready.wait(timeout=2)
 
     assert len(fetch.calls) == 1
-    assert fetch.calls[0][0] == "https://api.debugbundle.com/v1/sdk/config"
+    assert fetch.calls[0][0] == "https://api.debugbundle.com/v1/sdk/config?debugbundle_evidence=1"
     assert fetch.calls[0][1]["method"] == "GET"
+    assert fetch.calls[0][1]["headers"]["authorization"] == "Bearer dbundle_proj_test"
 
 
 def test_remote_config_uses_etag_and_activates_heavy_probes_only_while_directive_is_live() -> None:
@@ -272,9 +285,7 @@ def test_balanced_capture_policy_keeps_immediate_failures_but_not_unconfigured_4
 
     events = _events(transport)
     request_statuses = [
-        event["payload"]["response_status"]
-        for event in events
-        if event["event_type"] == "request_event"
+        event["payload"]["response_status"] for event in events if event["event_type"] == "request_event"
     ]
     assert request_statuses == [429]
 
@@ -406,8 +417,6 @@ def test_capture_policy_promotes_configured_client_error_statuses_when_request_c
 
     events = _events(transport)
     request_statuses = [
-        event["payload"]["response_status"]
-        for event in events
-        if event["event_type"] == "request_event"
+        event["payload"]["response_status"] for event in events if event["event_type"] == "request_event"
     ]
     assert request_statuses == [403, 422]

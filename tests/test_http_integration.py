@@ -79,9 +79,7 @@ class MockIngestionServer:
 
 
 def test_sdk_flush_posts_real_http_batch_to_mock_ingestion_server() -> None:
-    server = MockIngestionServer(
-        [PlannedResponse(status_code=202, body={"accepted": 2, "rejected": 0, "errors": []})]
-    )
+    server = MockIngestionServer([PlannedResponse(status_code=202, body={"accepted": 2, "rejected": 0, "errors": []})])
     server.start()
 
     try:
@@ -106,7 +104,7 @@ def test_sdk_flush_posts_real_http_batch_to_mock_ingestion_server() -> None:
     assert len(server.requests) == 1
     request = server.requests[0]
     assert request.method == "POST"
-    assert request.path == "/v1/events"
+    assert request.path == "/v1/events?debugbundle_evidence=1"
     assert request.headers["authorization"] == "Bearer dbundle_proj_test"
     assert request.headers["content-type"] == "application/json"
     events = request.body["events"]

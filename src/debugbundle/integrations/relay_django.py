@@ -20,6 +20,7 @@ def create_django_relay_view(
     service: str | None = None,
     environment: str | None = None,
     forward_transport: Any = None,
+    evidence_capabilities: object = None,
 ) -> Any:
     handler = BrowserRelayHandler(
         allowed_origins=allowed_origins or [],
@@ -35,6 +36,7 @@ def create_django_relay_view(
         service=service,
         environment=environment,
         forward_transport=forward_transport,
+        evidence_capabilities=evidence_capabilities,
     )
 
     def view(request: Any) -> Any:
@@ -47,8 +49,9 @@ def create_django_relay_view(
         response = handler.handle(
             {
                 "method": request.method,
+                "url": request.get_full_path(),
                 "headers": headers,
-                "body": request.body.decode("utf-8") if isinstance(request.body, bytes) else str(request.body),
+                "body": request.read(handler.max_body_bytes + 1),
                 "ipAddress": _get_client_ip(request),
             }
         )

@@ -20,6 +20,7 @@ def create_flask_relay_handler(
     service: str | None = None,
     environment: str | None = None,
     forward_transport: Any = None,
+    evidence_capabilities: object = None,
     route_path: str = "/debugbundle/browser",
 ) -> Any:
     handler = BrowserRelayHandler(
@@ -36,6 +37,7 @@ def create_flask_relay_handler(
         service=service,
         environment=environment,
         forward_transport=forward_transport,
+        evidence_capabilities=evidence_capabilities,
     )
 
     def register(app: Any) -> None:
@@ -46,8 +48,9 @@ def create_flask_relay_handler(
             response = handler.handle(
                 {
                     "method": request.method,
+                    "url": request.full_path,
                     "headers": dict(request.headers.items()),
-                    "body": request.get_data(as_text=True),
+                    "body": request.stream.read(handler.max_body_bytes + 1),
                     "ipAddress": request.remote_addr,
                 }
             )

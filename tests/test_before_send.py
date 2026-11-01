@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import uuid
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 import pytest
 
@@ -32,9 +34,9 @@ def event_for(event_type: str, payload: Mapping[str, object]) -> dict[str, objec
                 "message": "boom",
                 "stack": "trace",
                 "handled": True,
-                "request": {},
-                "response": {},
-                "runtime": {},
+                "request": {"method": "GET", "path": "/", "query": {}, "headers": {}},
+                "response": {"status_code": 500},
+                "runtime": {"version": "3.10"},
             },
         ),
         (
@@ -49,8 +51,16 @@ def event_for(event_type: str, payload: Mapping[str, object]) -> dict[str, objec
             },
         ),
         ("log_event", {"level": "error", "message": "boom", "attributes": {}}),
-        ("frontend_breadcrumb", {"breadcrumb_type": "navigation", "data": {}}),
-        ("frontend_exception", {"name": "TypeError", "message": "boom", "stack": "trace"}),
+        ("frontend_breadcrumb", {"breadcrumb_type": "route_change", "data": {}}),
+        (
+            "frontend_exception",
+            {
+                "name": "TypeError",
+                "message": "boom",
+                "stack": "trace",
+                "browser": {"name": "unknown", "version": "unknown"},
+            },
+        ),
         (
             "deploy_metadata",
             {
@@ -132,3 +142,84 @@ def test_hook_drop_and_failure_are_safe() -> None:
     result = apply_before_send(event, failing_hook, lambda code, _message: diagnostics.append(code))
     assert result == copy.deepcopy(event)
     assert diagnostics == ["before_send_failed"]
+
+
+def test_hook_validation_never_iterates_custom_envelopes_or_formats_custom_identity() -> None:
+    calls: list[str] = []
+
+    class Envelope(dict):
+        def __iter__(self):
+            calls.append("iterate")
+            return super().__iter__()
+
+    class Identity:
+        def __str__(self):
+            calls.append("format")
+            return str(uuid.uuid4())
+
+    event = event_for("log_event", {"level": "error", "message": "original", "attributes": {}})
+    for candidate in (Envelope(event), {**event, "event_id": Identity()}):
+        assert apply_before_send(event, lambda _: candidate, lambda *_args: None) == event
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "name": "Error",
+            "message": "safe",
+            "stack": "trace",
+            "handled": True,
+            "request": {},
+            "response": {},
+            "runtime": {},
+        },
+        {"level": "error", "message": "safe", "attributes": {}, "device": {"platform": 7}},
+    ],
+)
+def test_hook_rejects_nested_fields_outside_the_accepting_contract(payload) -> None:
+    original = event_for("log_event", {"level": "error", "message": "original", "attributes": {}})
+    kind = "backend_exception" if "request" in payload else "log_event"
+    replacement = event_for(kind, payload)
+    assert not _is_valid_event(replacement)
+    assert apply_before_send(original, lambda _: replacement, lambda *_: None) == original
+
+
+def test_hook_withholds_validation_budget_exhaustion_without_restoring_private_original() -> None:
+    original = event_for("log_event", {"level": "error", "message": "private original", "attributes": {}})
+    replacement = event_for("log_event", {"level": "error", "message": "safe", "attributes": {}})
+    replacement["context"] = {"application": "x" * (9 * 1024 * 1024)}
+    assert apply_before_send(original, lambda _: replacement, lambda *_: None) is None
+
+
+def test_hook_owns_nested_json_and_never_executes_application_serializers_or_equality() -> None:
+    calls = []
+
+    class Foreign(dict):
+        def items(self):
+            calls.append("items")
+            raise AssertionError("application callback")
+
+        def __deepcopy__(self, memo):
+            calls.append("copy")
+            raise AssertionError("application callback")
+
+    original = event_for("log_event", {"level": "error", "message": "original", "attributes": {}})
+    replacement = event_for("log_event", {"level": "custom", "message": "safe", "attributes": {"nested": []}})
+    accepted = apply_before_send(original, lambda _: replacement, lambda *_: None)
+    assert accepted == replacement and accepted is not replacement
+    replacement["payload"]["attributes"]["nested"].append("later mutation")
+    assert accepted["payload"]["attributes"]["nested"] == []
+    replacement["context"] = {"foreign": Foreign()}
+    assert apply_before_send(original, lambda _: replacement, lambda *_: None) == original
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    json.loads(Path(__file__).with_name("fixtures").joinpath("evidence-wire-cases.json").read_text())["events"],
+    ids=lambda fixture: fixture["id"],
+)
+def test_complete_boundary_matches_accepting_evidence_corpus(fixture) -> None:
+    assert _is_valid_event(fixture["event"]) == fixture["valid"]

@@ -109,3 +109,18 @@ def test_cleanup_temp_files_ignores_missing_directories_and_remove_failures(
     assert not stale_tmp_file.exists()
     assert blocked_tmp_file.exists()
     assert keep_file.exists()
+
+
+def test_spool_marker_never_truncates_existing_files_or_follows_symlinks(tmp_path) -> None:
+    batch = tmp_path / "batch.events.json"
+    batch.write_text("[]")
+    marker = batch.with_name(batch.name + ".delivered")
+    foreign = tmp_path / "foreign.txt"
+    foreign.write_text("retained application content")
+    marker.symlink_to(foreign)
+    relay_delivery.mark_spool_file_delivered(str(batch))
+    assert foreign.read_text() == "retained application content"
+    marker.unlink()
+    marker.write_text("existing marker content")
+    relay_delivery.mark_spool_file_delivered(str(batch))
+    assert marker.read_text() == "existing marker content"

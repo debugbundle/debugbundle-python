@@ -36,20 +36,14 @@ def _event_types(transport: FakeTransport) -> list[str]:
 
 def _last_request_event(transport: FakeTransport) -> dict[str, object]:
     request_events = [
-        event
-        for call in transport.calls
-        for event in call["events"]
-        if event["event_type"] == "request_event"
+        event for call in transport.calls for event in call["events"] if event["event_type"] == "request_event"
     ]
     return request_events[-1]
 
 
 def _last_event_of_type(transport: FakeTransport, event_type: str) -> dict[str, object]:
     matching_events = [
-        event
-        for call in transport.calls
-        for event in call["events"]
-        if event["event_type"] == event_type
+        event for call in transport.calls for event in call["events"] if event["event_type"] == event_type
     ]
     return matching_events[-1]
 
@@ -84,6 +78,51 @@ def _ensure_django() -> None:
         import django
 
         django.setup()
+
+
+@pytest.mark.parametrize("framework", ["flask", "fastapi", "django"])
+def test_relay_adapters_bound_body_reads_before_handler_parse(framework: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("unbounded request body accessor")
+
+    if framework == "flask":
+        from flask import Flask, Request
+
+        app = Flask(__name__)
+        create_flask_relay_handler(allowed_origins=["https://example.com"], max_body_bytes=128)(app)
+        monkeypatch.setattr(Request, "get_data", forbidden)
+        result = app.test_client().post(
+            "/debugbundle/browser?debugbundle_evidence=1",
+            data=b"x" * 1000,
+            content_type="application/json",
+            headers={"Origin": "https://example.com"},
+        )
+    elif framework == "fastapi":
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from starlette.requests import Request
+
+        app = FastAPI()
+        create_fastapi_relay_handler(allowed_origins=["https://example.com"], max_body_bytes=128)(app)
+        monkeypatch.setattr(Request, "body", forbidden)
+        result = TestClient(app).post(
+            "/debugbundle/browser?debugbundle_evidence=1",
+            content=b"x" * 1000,
+            headers={"Origin": "https://example.com", "Content-Type": "application/json"},
+        )
+    else:
+        _ensure_django()
+        from django.test import RequestFactory
+
+        request = RequestFactory().post(
+            "/debugbundle/browser?debugbundle_evidence=1",
+            data=b"x" * 1000,
+            content_type="application/json",
+            HTTP_ORIGIN="https://example.com",
+        )
+        monkeypatch.setattr(type(request), "body", property(forbidden))
+        result = create_django_relay_view(allowed_origins=["https://example.com"], max_body_bytes=128)(request)
+    assert result.status_code == 413
 
 
 def test_flask_integration_captures_requests_logs_and_errors() -> None:

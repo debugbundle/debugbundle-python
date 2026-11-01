@@ -33,6 +33,9 @@ def init(
     on_diagnostic: Callable[[dict[str, object]], None] | None = None,
     before_send: BeforeSendHook | None = None,
     probes_poll_interval: int = 60_000,
+    capture_exception_evidence: bool = True,
+    evidence_capabilities: object = None,
+    capture_recovery_observations: bool = False,
 ) -> None:
     _sdk.init(
         project_token=project_token,
@@ -52,6 +55,9 @@ def init(
         on_diagnostic=on_diagnostic,
         before_send=before_send,
         probes_poll_interval=probes_poll_interval,
+        capture_exception_evidence=capture_exception_evidence,
+        evidence_capabilities=evidence_capabilities,
+        capture_recovery_observations=capture_recovery_observations,
     )
 
 
@@ -61,6 +67,14 @@ def capture_exception(error: BaseException, context: dict[str, object] | None = 
 
 def capture_error(error: BaseException, context: dict[str, object] | None = None) -> None:
     _sdk.capture_error(error, context=context)
+
+
+def operation_context(options: object) -> Any:
+    return _sdk.operation_context(options)
+
+
+def capture_recovery(observation: object) -> None:
+    _sdk.capture_recovery(observation)
 
 
 def capture_log(message: str, level: str = "warning", context: dict[str, object] | None = None) -> None:
@@ -155,6 +169,7 @@ __all__ = [
     "capture_logging",
     "capture_message",
     "capture_request",
+    "capture_recovery",
     "create_django_relay_view",
     "create_fastapi_relay_handler",
     "create_flask_relay_handler",
@@ -164,5 +179,6 @@ __all__ = [
     "instrument_fastapi",
     "instrument_flask",
     "probe",
+    "operation_context",
     "set_context",
 ]

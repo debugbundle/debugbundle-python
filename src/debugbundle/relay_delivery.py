@@ -4,12 +4,17 @@ import json
 import os
 import re
 import secrets
+import stat
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .acknowledgement import decide_acknowledgement
+from .evidence_delivery import EvidenceDelivery
+from .evidence_wire import FEATURES, strip_unsupported
+from .ingestion_wire import MAX_EVENT_BYTES, chunks, event_bytes, fit_event
 from .transport import HttpTransport, coerce_transport_response
 
 LOCAL_EVENTS_DIRECTORY_MODE = 0o700
@@ -38,8 +43,11 @@ def attach_project_token(events: list[dict[str, Any]], project_token: str) -> li
 
 def mark_spool_file_delivered(written_file_path: str) -> None:
     try:
-        with open(f"{written_file_path}{RELAY_SPOOL_DELIVERED_MARKER_SUFFIX}", "w", encoding="utf-8"):
-            pass
+        if not stat.S_ISREG(os.lstat(written_file_path).st_mode):
+            return
+        marker = f"{written_file_path}{RELAY_SPOOL_DELIVERED_MARKER_SUFFIX}"
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | OPTIONAL_NOFOLLOW_FLAG, LOCAL_EVENT_FILE_MODE)
+        os.close(fd)
     except OSError:
         # Durable acceptance already happened at the spool write; marker creation is maintenance metadata only.
         return
@@ -79,26 +87,109 @@ class AtomicRelayFileTransport:
 
 
 class RelayForwardTransport:
-    def __init__(self, endpoint: str, transport: Callable[[Mapping[str, object]], object] | None = None) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        transport: Callable[[Mapping[str, object]], object] | None = None,
+        evidence: EvidenceDelivery | None = None,
+    ) -> None:
         self._transport = transport or HttpTransport(endpoint)
+        self._evidence = evidence or EvidenceDelivery()
 
-    def send(self, project_token: str, events: list[dict[str, Any]]) -> tuple[bool, bool]:
+    @staticmethod
+    def prepare_event(event: dict[str, Any], project_token: str) -> dict[str, Any] | None:
+        owned = dict(event, project_token=project_token)
+        if event.get("event_type") == "analytics_event":
+            reduced = owned if event_bytes(owned) <= MAX_EVENT_BYTES else None
+        else:
+            reduced = fit_event(owned)
+        return {key: value for key, value in reduced.items() if key != "project_token"} if reduced else None
+
+    def send(self, project_token: str, events: list[dict[str, Any]], discover: bool = False) -> tuple[bool, bool]:
+        configured, success, _complete = self.send_verified(project_token, events, discover)
+        return configured, success
+
+    def send_verified(
+        self, project_token: str, events: list[dict[str, Any]], discover: bool = False
+    ) -> tuple[bool, bool, bool]:
         if not project_token:
-            return (False, False)
-
+            return False, False, False
+        deadline = time.monotonic() + 5.0
         try:
-            response = coerce_transport_response(
-                self._transport(
-                    {
-                        "project_token": project_token,
-                        "events": attach_project_token(events, project_token),
-                    }
-                )
-            )
+            complete = True
+            # Start with the neutral intersection, so a previously unknown path
+            # can learn proof from this batch's canonical existing ACK traffic.
+            features = list(FEATURES)
+            for original in chunks(attach_project_token(events, project_token)):
+                if time.monotonic() >= deadline:
+                    return True, False, False
+                batch: list[dict[str, Any]] = []
+                for event in original:
+                    selected = (
+                        strip_unsupported(event, self._evidence.features)
+                        if event.get("event_type") != "analytics_event"
+                        else event
+                    )
+                    if selected is None:
+                        return True, False, False
+                    batch.append(selected)
+                success, canonical = self._send_chunk(project_token, batch, discover, deadline)
+                features = [feature for feature in features if feature in self._evidence.features]
+                self._evidence.features = list(features)
+                if not success or time.monotonic() >= deadline:
+                    return True, False, False
+                complete = complete and canonical
+            return True, True, complete
         except Exception:
-            return (True, False)
+            return True, False, False
 
-        return (True, 200 <= response.status_code < 300)
+    def _send_chunk(
+        self, project_token: str, events: list[dict[str, Any]], discover: bool, deadline: float
+    ) -> tuple[bool, bool]:
+        try:
+
+            def send(batch: list[dict[str, Any]]):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("relay forwarding deadline exhausted")
+                request = {"project_token": project_token, "events": batch}
+                response = (
+                    self._transport.send_until(request, deadline)
+                    if isinstance(self._transport, HttpTransport)
+                    else self._transport(request)
+                )
+                return coerce_transport_response(response)
+
+            response = send(events)
+            if not 200 <= response.status_code < 300:
+                return False, False
+            required = discover or isinstance(self._transport, HttpTransport)
+            ack = decide_acknowledgement(response.body, len(events), required)
+            lost = self._evidence.observe(response.body, required, ack.kind == "acknowledged")
+            if ack.kind == "legacy":
+                return True, False
+            if ack.kind != "acknowledged":
+                return False, False
+            if ack.accepted == len(events):
+                return True, True
+            retries = []
+            if lost:
+                for index, reason in ack.terminal_errors:
+                    original = events[index]
+                    if reason == "invalid_event" and original.get("event_type") == "frontend_exception":
+                        reduced = strip_unsupported(original, self._evidence.features)
+                        if reduced is not None and reduced != original:
+                            retries.append(reduced)
+            if not retries:
+                return False, False
+            response = send(retries)
+            if not 200 <= response.status_code < 300:
+                return False, False
+            retry_ack = decide_acknowledgement(response.body, len(retries), True)
+            self._evidence.observe(response.body, required, retry_ack.kind == "acknowledged")
+            complete = retry_ack.kind == "acknowledged" and ack.accepted + retry_ack.accepted == len(events)
+            return complete, complete
+        except Exception:
+            return False, False
 
 
 def _sanitize_service_name(service_name: str) -> str:

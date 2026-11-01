@@ -39,9 +39,12 @@ def test_replacement_rechecks_log_request_and_probe_policy() -> None:
             event["payload"]["response_status"] = 200
         else:
             event["event_type"] = "probe_event"
-            event["payload"] = {"label": "test", "data": {},
-                                "activation_id": "36beb3e1-bf61-4c3c-94ba-42102a9c26c0",
-                                "probe_label_pattern": "test"}
+            event["payload"] = {
+                "label": "test",
+                "data": {},
+                "activation_id": "36beb3e1-bf61-4c3c-94ba-42102a9c26c0",
+                "probe_label_pattern": "test",
+            }
         return event
 
     sdk = DebugBundleSdk(transport=lambda request: sent.extend(request["events"]) or 202)
@@ -60,8 +63,7 @@ def test_replacement_rechecks_log_request_and_probe_policy() -> None:
 def test_hook_keeps_admitted_info_and_promoted_failed_requests() -> None:
     sent: list[dict[str, object]] = []
     sdk = DebugBundleSdk(transport=lambda request: sent.extend(request["events"]) or 202)
-    sdk.init(project_token="dbundle_proj_test", log_level="info", flush_interval=3600,
-             before_send=lambda event: event)
+    sdk.init(project_token="dbundle_proj_test", log_level="info", flush_interval=3600, before_send=lambda event: event)
     sdk._capture_policy = replace(MINIMAL_CAPTURE_POLICY, capture_logs="info", capture_request_events="off")
     try:
         sdk.capture_log("intentional info", level="info")
@@ -105,4 +107,23 @@ def test_hook_identity_changes_keep_each_retained_event_charged_on_retry() -> No
         assert sdk._buffer_bytes == sum(sdk._event_bytes(event) for event in sdk._buffer)
     finally:
         release.set()
+        sdk.dispose()
+
+
+def test_post_hook_privacy_output_is_revalidated_before_transport() -> None:
+    sent = []
+
+    def hook(event):
+        event["payload"]["request"]["headers"] = {f"header_{i}": "value" for i in range(257)}
+        return event
+
+    sdk = DebugBundleSdk(transport=lambda request: sent.extend(request["events"]) or 202)
+    sdk.init(project_token="dbundle_proj_test", batch_size=1000, flush_interval=3600, before_send=hook)
+    try:
+        sdk.capture_exception(RuntimeError("primary"))
+        sdk.flush()
+        # Bounded privacy withholds the over-wide map. Its resulting scalar must
+        # never escape in the canonical object-only request.headers field.
+        assert not sent
+    finally:
         sdk.dispose()

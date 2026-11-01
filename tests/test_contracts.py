@@ -29,6 +29,9 @@ def test_module_init_exposes_contract_friendly_signature() -> None:
         "on_diagnostic",
         "before_send",
         "probes_poll_interval",
+        "capture_exception_evidence",
+        "evidence_capabilities",
+        "capture_recovery_observations",
     ]
 
 

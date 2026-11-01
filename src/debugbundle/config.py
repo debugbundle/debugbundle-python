@@ -22,6 +22,7 @@ class CapturePolicy:
     capture_probe_events: str
     immediate_client_error_statuses: tuple[int, ...]
     immediate_client_error_path_rules: tuple[ImmediateClientErrorPathRule, ...] = ()
+    capture_diagnostic_context: bool = True
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ MINIMAL_CAPTURE_POLICY = CapturePolicy(
     capture_probe_events="buffer_only",
     immediate_client_error_statuses=(),
     immediate_client_error_path_rules=(),
+    capture_diagnostic_context=False,
 )
 
 
@@ -147,6 +149,9 @@ def _parse_capture_policy(payload: object) -> CapturePolicy | None:
         return None
     if immediate_client_error_statuses is None or immediate_client_error_path_rules is None:
         return None
+    diagnostic = payload.get("capture_diagnostic_context", True)
+    if type(diagnostic) is not bool:
+        return None
 
     return CapturePolicy(
         preset=preset,
@@ -156,6 +161,7 @@ def _parse_capture_policy(payload: object) -> CapturePolicy | None:
         capture_probe_events=capture_probe_events,
         immediate_client_error_statuses=immediate_client_error_statuses,
         immediate_client_error_path_rules=immediate_client_error_path_rules,
+        capture_diagnostic_context=preset != "minimal" and diagnostic,
     )
 
 

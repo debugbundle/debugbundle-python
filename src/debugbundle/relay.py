@@ -5,7 +5,11 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
+from .before_send import _is_valid_event
+from .evidence_delivery import EvidenceDelivery
+from .evidence_wire import strip_unsupported, validate_evidence, without_optional
 from .redaction import UnsafeTelemetry, has_safe_event_identity, sanitize_telemetry
 from .relay_delivery import (
     AtomicRelayFileTransport,
@@ -27,6 +31,7 @@ ACCEPTED_EVENT_TYPES = frozenset(
         "request_event",
         "probe_event",
         "analytics_event",
+        "diagnostic_context",
     }
 )
 
@@ -61,6 +66,7 @@ class BrowserRelayHandler:
     service: str | None = None
     environment: str | None = None
     forward_transport: Callable[[Mapping[str, object]], object] | None = None
+    evidence_capabilities: object = None
 
     def __post_init__(self) -> None:
         self.allowed_origins = [o for o in self.allowed_origins if o]
@@ -73,8 +79,9 @@ class BrowserRelayHandler:
         self._rate_limit_state: dict[str, list[int]] = {}
         self._local_transports: dict[str, AtomicRelayFileTransport] = {}
         self._spool_transports: dict[str, AtomicRelayFileTransport] = {}
+        self._evidence = EvidenceDelivery(self.evidence_capabilities)
         self._forwarder = (
-            RelayForwardTransport(self.endpoint, self.forward_transport)
+            RelayForwardTransport(self.endpoint, self.forward_transport, self._evidence)
             if self.project_mode == "connected" and self.endpoint is not None
             else None
         )
@@ -87,9 +94,19 @@ class BrowserRelayHandler:
             return BrowserRelayResponse(403)
 
         response_headers = _cors_headers(source_origin) if source_origin else {}
+        discover = headers.get("x-debugbundle-evidence") == "1" or parse_qs(
+            urlsplit(str(request.get("url", ""))).query
+        ).get("debugbundle_evidence") == ["1"]
 
         def with_headers(response: BrowserRelayResponse) -> BrowserRelayResponse:
-            return BrowserRelayResponse(response.status, response.body, {**response_headers, **response.headers})
+            body = response.body
+            if discover and body is not None:
+                body = {**body, "evidence_capabilities": {"version": 1, "features": list(self._evidence.features)}}
+                if "errors" in body and indexed_errors:
+                    body["evidence_errors"] = indexed_errors
+            return BrowserRelayResponse(response.status, body, {**response_headers, **response.headers})
+
+        indexed_errors: list[dict[str, object]] = []
 
         if method == "OPTIONS":
             return with_headers(BrowserRelayResponse(204))
@@ -98,10 +115,16 @@ class BrowserRelayHandler:
             return with_headers(BrowserRelayResponse(405))
 
         if not _is_supported_content_type(headers.get("content-type")):
-            return with_headers(BrowserRelayResponse(
-                400,
-                {"accepted": 0, "rejected": 0, "errors": ["Relay requests must use Content-Type: application/json."]},
-            ))
+            return with_headers(
+                BrowserRelayResponse(
+                    400,
+                    {
+                        "accepted": 0,
+                        "rejected": 0,
+                        "errors": ["Relay requests must use Content-Type: application/json."],
+                    },
+                )
+            )
 
         body: str = request.get("body", "")
         if len(body.encode("utf-8") if isinstance(body, str) else body) > self.max_body_bytes:
@@ -114,23 +137,29 @@ class BrowserRelayHandler:
         try:
             decoded = json.loads(body)
         except (json.JSONDecodeError, TypeError, ValueError):
-            return with_headers(BrowserRelayResponse(
-                400,
-                {"accepted": 0, "rejected": 0, "errors": ["Relay request body must be valid JSON."]},
-            ))
+            return with_headers(
+                BrowserRelayResponse(
+                    400,
+                    {"accepted": 0, "rejected": 0, "errors": ["Relay request body must be valid JSON."]},
+                )
+            )
 
         if not isinstance(decoded, dict):
-            return with_headers(BrowserRelayResponse(
-                400,
-                {"accepted": 0, "rejected": 0, "errors": ["Relay request body must be valid JSON."]},
-            ))
+            return with_headers(
+                BrowserRelayResponse(
+                    400,
+                    {"accepted": 0, "rejected": 0, "errors": ["Relay request body must be valid JSON."]},
+                )
+            )
 
         batch = decoded.get("batch")
         if not isinstance(batch, list):
-            return with_headers(BrowserRelayResponse(
-                400,
-                {"accepted": 0, "rejected": 0, "errors": ["Relay request body must include a batch array."]},
-            ))
+            return with_headers(
+                BrowserRelayResponse(
+                    400,
+                    {"accepted": 0, "rejected": 0, "errors": ["Relay request body must include a batch array."]},
+                )
+            )
 
         accepted_events: list[dict[str, Any]] = []
         errors: list[str] = []
@@ -138,24 +167,31 @@ class BrowserRelayHandler:
         for index, candidate in enumerate(batch):
             if not isinstance(candidate, dict):
                 errors.append(f"batch[{index}]: Relay events must be objects.")
+                indexed_errors.append({"index": index, "reason": "invalid_event"})
                 continue
 
             event_type = candidate.get("event_type")
             if not isinstance(event_type, str) or event_type not in ACCEPTED_EVENT_TYPES:
                 type_label = event_type if isinstance(event_type, str) else "unknown"
                 errors.append(f"batch[{index}]: Unsupported browser relay event type {type_label}.")
+                indexed_errors.append({"index": index, "reason": "invalid_event"})
                 continue
 
             sanitized = _sanitize_event(candidate, service_override=self.service, environment_override=self.environment)
+            if sanitized is not None and sanitized["event_type"] != "analytics_event":
+                sanitized = strip_unsupported(sanitized, self._evidence.features)
+            if sanitized is not None and self._forwarder is not None and self.project_token:
+                sanitized = self._forwarder.prepare_event(sanitized, self.project_token)
             if sanitized is None:
                 errors.append(f"batch[{index}]: Invalid browser relay event payload.")
+                indexed_errors.append({"index": index, "reason": "invalid_event"})
                 continue
 
             accepted_events.append(sanitized)
 
         if accepted_events:
             try:
-                if not self._deliver_events(accepted_events):
+                if not self._deliver_events(accepted_events, discover):
                     return with_headers(BrowserRelayResponse(500))
 
                 if self.on_accept is not None:
@@ -171,17 +207,21 @@ class BrowserRelayHandler:
                 return with_headers(BrowserRelayResponse(500))
 
         if errors:
-            return with_headers(BrowserRelayResponse(
-                400,
-                {"accepted": len(accepted_events), "rejected": len(errors), "errors": errors},
-            ))
+            return with_headers(
+                BrowserRelayResponse(
+                    202 if discover else 400,
+                    {"accepted": len(accepted_events), "rejected": len(errors), "errors": errors},
+                )
+            )
 
-        return with_headers(BrowserRelayResponse(
-            202,
-            {"accepted": len(accepted_events), "rejected": 0, "errors": []},
-        ))
+        return with_headers(
+            BrowserRelayResponse(
+                202,
+                {"accepted": len(accepted_events), "rejected": 0, "errors": []},
+            )
+        )
 
-    def _deliver_events(self, accepted_events: list[dict[str, Any]]) -> bool:
+    def _deliver_events(self, accepted_events: list[dict[str, Any]], discover: bool = False) -> bool:
         if self.project_mode is None:
             return True
 
@@ -214,20 +254,22 @@ class BrowserRelayHandler:
             if spool_write_result.status_code != 202:
                 return False
 
-            configured, succeeded = self._forward_connected_events(accepted_events)
-            if succeeded and spool_write_result.written_file_path is not None:
+            configured, _succeeded, complete = self._forward_connected_events(accepted_events, discover)
+            if complete and spool_write_result.written_file_path is not None:
                 mark_spool_file_delivered(spool_write_result.written_file_path)
 
             return True if configured or spool_write_result.written_file_path is not None else False
 
-        configured, succeeded = self._forward_connected_events(accepted_events)
+        configured, succeeded, _complete = self._forward_connected_events(accepted_events, discover)
         return configured and succeeded
 
-    def _forward_connected_events(self, accepted_events: list[dict[str, Any]]) -> tuple[bool, bool]:
+    def _forward_connected_events(
+        self, accepted_events: list[dict[str, Any]], discover: bool = False
+    ) -> tuple[bool, bool, bool]:
         if self._forwarder is None or not self.project_token:
-            return (False, False)
+            return (False, False, False)
 
-        return self._forwarder.send(self.project_token, accepted_events)
+        return self._forwarder.send_verified(self.project_token, accepted_events, discover)
 
     def _is_origin_allowed(self, headers: dict[str, str]) -> bool:
         origin = _source_origin(headers)
@@ -277,7 +319,7 @@ def _cors_headers(origin: str) -> dict[str, str]:
     return {
         "access-control-allow-origin": origin,
         "access-control-allow-methods": "POST, OPTIONS",
-        "access-control-allow-headers": "content-type",
+        "access-control-allow-headers": "content-type, x-debugbundle-evidence",
         "access-control-max-age": "600",
         "vary": "Origin",
     }
@@ -393,11 +435,26 @@ def _sanitize_event(
         if normalized_correlation:
             sanitized["correlation"] = normalized_correlation
 
+    if isinstance(event.get("context"), dict):
+        sanitized["context"] = event["context"]
+    evidence = event_type != "analytics_event" and (
+        event_type == "diagnostic_context"
+        or any(key in payload for key in ("exception_evidence", "execution", "resource_observations"))
+    )
+    if evidence and not _is_valid_event(sanitized):
+        return None
+
     try:
         if not has_safe_event_identity(sanitized):
             return None
         sanitized["payload"] = sanitize_telemetry(sanitized["payload"])
         sanitized["service"] = sanitize_telemetry(sanitized["service"])
+        if "context" in sanitized:
+            sanitized["context"] = sanitize_telemetry(sanitized["context"])
     except UnsafeTelemetry:
-        return None
+        fallback = without_optional(sanitized) if evidence else None
+        return _sanitize_event(fallback, service_override, environment_override) if fallback is not None else None
+    if evidence and (not _is_valid_event(sanitized) or not validate_evidence(sanitized)):
+        fallback = without_optional(sanitized)
+        return _sanitize_event(fallback, service_override, environment_override) if fallback is not None else None
     return sanitized

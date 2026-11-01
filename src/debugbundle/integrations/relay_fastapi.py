@@ -23,6 +23,7 @@ def create_fastapi_relay_handler(
     service: str | None = None,
     environment: str | None = None,
     forward_transport: Any = None,
+    evidence_capabilities: object = None,
     route_path: str = "/debugbundle/browser",
 ) -> Any:
     handler = BrowserRelayHandler(
@@ -39,20 +40,27 @@ def create_fastapi_relay_handler(
         service=service,
         environment=environment,
         forward_transport=forward_transport,
+        evidence_capabilities=evidence_capabilities,
     )
 
     def register(app: Any) -> None:
         @app.api_route(route_path, methods=["POST", "OPTIONS"])
         async def debugbundle_browser_relay(request: Request) -> Response:
-            body = await request.body()
+            body = bytearray()
+            async for chunk in request.stream():
+                remaining = handler.max_body_bytes + 1 - len(body)
+                body.extend(chunk[:remaining])
+                if len(body) > handler.max_body_bytes:
+                    break
             headers = {str(key): str(value) for key, value in request.headers.items()}
             ip_address = request.client.host if request.client else None
 
             response = handler.handle(
                 {
                     "method": request.method,
+                    "url": str(request.url),
                     "headers": headers,
-                    "body": body.decode("utf-8") if isinstance(body, bytes) else str(body),
+                    "body": bytes(body),
                     "ipAddress": ip_address,
                 }
             )

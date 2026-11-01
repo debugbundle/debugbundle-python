@@ -7,6 +7,9 @@ import threading
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
+from .diagnostic_budget import DiagnosticCaptureBudget
+from .evidence_delivery import EvidenceDelivery
+from .operation_context import OperationContexts
 from .suppression import EventSuppressionTracker
 from .transport import HttpTransport
 
@@ -27,6 +30,10 @@ def ensure_current_process(sdk: DebugBundleSdk) -> None:
     sdk._initial_config_ready = threading.Event()
     sdk._initial_config_ready.set()
     sdk._generation += 1
+    sdk._operations = OperationContexts()
+    sdk._evidence = EvidenceDelivery()
+    sdk._diagnostics = DiagnosticCaptureBudget()
+    sdk._hook_bypass = set()
     sdk._sending = False
     sdk._inflight_count = 0
     sdk._timer_due_at = 0.0

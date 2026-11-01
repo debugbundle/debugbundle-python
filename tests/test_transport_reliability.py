@@ -11,6 +11,41 @@ from debugbundle.core import DebugBundleSdk
 from debugbundle.transport import HttpTransport, TransportResponse
 
 
+def test_http_ack_body_is_bounded_and_closed_before_parsing() -> None:
+    class Body(httpx.SyncByteStream):
+        closed = False
+        chunks = 0
+
+        def __iter__(self):
+            for _ in range(100):
+                self.chunks += 1
+                yield b"x" * 16384
+
+        def close(self):
+            self.closed = True
+
+    body = Body()
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(202, stream=body)
+
+    transport = HttpTransport("https://example.invalid/events?existing=1")
+    transport._client.close()
+    transport._client = httpx.Client(transport=httpx.MockTransport(respond))
+    try:
+        result = transport({"project_token": "dbundle_proj_test", "events": []})
+        assert result.body is None
+        assert body.closed
+        assert body.chunks <= 17
+        assert requests[0].url.params["existing"] == "1"
+        assert requests[0].url.params["debugbundle_evidence"] == "1"
+        assert requests[0].headers["accept-encoding"] == "identity"
+    finally:
+        transport.close()
+
+
 @pytest.mark.parametrize("hint", [float("nan"), float("inf"), "1e100", True])
 def test_invalid_custom_retry_hint_uses_safe_backoff_without_losing_events(hint: object) -> None:
     now = 1_700_000_000.0
@@ -142,3 +177,110 @@ def test_custom_retry_hint_cannot_suppress_delivery_beyond_five_minutes(body: ob
         assert len(calls) == 2
     finally:
         sdk.dispose()
+
+
+def test_native_sender_keeps_byte_bounded_ordered_batches_and_owned_hook_tails() -> None:
+    import json
+    import time
+
+    batches = []
+    hook_calls = []
+
+    def respond(request):
+        assert len(request.content) <= 256 * 1024
+        batch = json.loads(request.content)["events"]
+        batches.append(batch)
+        return httpx.Response(202, json={"accepted": len(batch), "rejected": 0, "errors": []})
+
+    def hook(event):
+        hook_calls.append(event["event_id"])
+        event["context"] = {"marker": "app redacted"}
+        return event
+
+    transport = HttpTransport("https://example.invalid/events")
+    transport._client.close()
+    transport._client = httpx.Client(transport=httpx.MockTransport(respond))
+    sdk = DebugBundleSdk(transport=transport)
+    sdk.init(project_token="dbundle_proj_test", batch_size=1000, flush_interval=3600, before_send=hook)
+    try:
+        for index in range(25):
+            sdk.capture_log("x" * 16000 + str(index), level="error")
+        expected = [event["event_id"] for event in sdk._buffer]
+        sdk.flush()
+        deadline = time.monotonic() + 3
+        while sdk._buffer and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(batches) > 1
+        assert [event["event_id"] for batch in batches for event in batch] == expected
+        assert hook_calls == expected
+        assert sdk._buffer_bytes == 0 and not sdk._buffer_sizes
+    finally:
+        sdk.dispose()
+        transport.close()
+
+
+def test_native_sender_withholds_unfit_valid_hook_without_restoring_removed_primary() -> None:
+    requests = []
+    transport = HttpTransport("https://example.invalid/events")
+    transport._client.close()
+    transport._client = httpx.Client(transport=httpx.MockTransport(lambda request: requests.append(request)))
+
+    def hook(event):
+        event["payload"]["message"] = "safe"
+        event["payload"]["attributes"] = {f"part_{i}": "x" * 16000 for i in range(10)}
+        event["context"] = {f"part_{i}": "x" * 16000 for i in range(10)}
+        return event
+
+    sdk = DebugBundleSdk(transport=transport)
+    sdk.init(project_token="dbundle_proj_test", batch_size=1000, flush_interval=3600, before_send=hook)
+    try:
+        sdk.capture_log("private original", level="error")
+        sdk.flush()
+        assert not requests
+        assert not sdk._buffer and sdk._buffer_bytes == 0
+    finally:
+        sdk.dispose()
+        transport.close()
+
+
+def test_native_wire_reduces_only_added_evidence_preserving_latest_primary_and_custom_reference() -> None:
+    import uuid
+
+    from debugbundle.exception_evidence import snapshot_exception
+    from debugbundle.ingestion_wire import MAX_EVENT_BYTES, event_bytes, fit_event
+
+    primary = {"event_type": "backend_exception", "payload": {"message": "safe primary"}, "context": {"detail": ""}}
+    for allowance in (16, 512):
+        primary["context"]["detail"] = "x" * (
+            MAX_EVENT_BYTES - event_bytes({**primary, "context": {"detail": ""}}) - allowance
+        )
+        graph = snapshot_exception(RuntimeError("cause" * 400))
+        enriched = {**primary, "payload": {**primary["payload"], "exception_evidence": graph}}
+        assert event_bytes(enriched) > MAX_EVENT_BYTES
+        reduced = fit_event(enriched)
+        assert reduced is not None and event_bytes(reduced) <= MAX_EVENT_BYTES
+        assert reduced["payload"] == primary["payload"]
+        assert reduced["context"]["detail"] == primary["context"]["detail"]
+        assert ("evidence_limits" in reduced["context"]) == (allowance == 512)
+
+    reference = {
+        "version": 1,
+        "failure_ref": str(uuid.uuid4()),
+        "scope": {"kind": "operation", "operation_id": str(uuid.uuid4())},
+    }
+    base = {"event_type": "log_event", "context": {"detail": "", "evidence_reference": reference}}
+    base["context"]["detail"] = "x" * (MAX_EVENT_BYTES - event_bytes(base) + 1)
+    reduced = fit_event(base)
+    assert reduced is not None and "evidence_reference" not in reduced["context"]
+    base["context"]["evidence_reference"]["version"] = 99
+    assert fit_event(base) is None
+    assert fit_event(None) is None
+
+
+def test_native_wire_rejects_unfit_single_events_before_any_request() -> None:
+    from debugbundle.ingestion_wire import MAX_BODY_BYTES, chunks, prefix
+
+    with pytest.raises(ValueError, match="exceeds ingestion"):
+        chunks([{"context": {"detail": "x" * MAX_BODY_BYTES}}])
+    assert prefix([]) == []
+    assert chunks([]) == []

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "debugbundle-python"
-version = "2.0.1"
+version = "2.1.0"
 description = "DebugBundle SDK for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -53,6 +53,9 @@ Issues = "https://github.com/debugbundle/debugbundle-python/issues"
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
+
+[tool.setuptools.package-data]
+debugbundle = ["event-envelope.schema.json", "py.typed"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

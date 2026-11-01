@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .evidence_delivery import reconcile_diagnostic
+
 if TYPE_CHECKING:
     from .core import DebugBundleSdk
 
@@ -14,8 +16,11 @@ def high_priority_event(event: dict[str, object]) -> bool:
     payload = event.get("payload")
     return isinstance(payload, dict) and (
         payload.get("level") in ("error", "critical")
-        or (event.get("event_type") == "request_event" and type(payload.get("response_status")) is int
-            and payload["response_status"] >= 500)
+        or (
+            event.get("event_type") == "request_event"
+            and type(payload.get("response_status")) is int
+            and payload["response_status"] >= 500
+        )
     )
 
 
@@ -32,8 +37,43 @@ def evict_low_priority(sdk: DebugBundleSdk) -> bool:
     for index in range(sdk._inflight_count, len(sdk._buffer)):
         if not high_priority_event(sdk._buffer[index]):
             evicted = sdk._buffer.pop(index)
+            sdk._hook_bypass.discard(id(evicted))
+            if evicted.get("event_type") == "diagnostic_context":
+                sdk._diagnostics.release([str(evicted["event_id"])])
             sdk._buffer_bytes -= sdk._buffer_sizes.pop(id(evicted))
             sdk._pending_low_priority -= 1
             sdk._pressure_drops = min(2**63 - 1, sdk._pressure_drops + 1)
             return True
     return False
+
+
+def offer_protected_event(
+    sdk: DebugBundleSdk,
+    protected: dict[str, object],
+    event_bytes: int,
+    max_events: int,
+    max_bytes: int,
+) -> bool:
+    if event_bytes > max_bytes:
+        sdk._pressure_drops += 1
+        return False
+    high_priority = high_priority_event(protected)
+    under_pressure = len(sdk._buffer) >= max_events or sdk._buffer_bytes + event_bytes > max_bytes
+    while len(sdk._buffer) >= max_events or sdk._buffer_bytes + event_bytes > max_bytes:
+        if not high_priority or not evict_low_priority(sdk):
+            sdk._pressure_drops += 1
+            return False
+    insertion = sdk._inflight_count
+    if not reconcile_diagnostic(sdk, None, protected):
+        return False
+    if high_priority and (protected.get("event_type") != "request_event" or under_pressure):
+        while insertion < len(sdk._buffer) and high_priority_event(sdk._buffer[insertion]):
+            insertion += 1
+        sdk._buffer.insert(insertion, protected)
+    else:
+        sdk._buffer.append(protected)
+        sdk._pending_low_priority += 1
+    sdk._buffer_bytes += event_bytes
+    sdk._buffer_sizes[id(protected)] = event_bytes
+    sdk._schedule_flush_locked(delay=0.0 if len(sdk._buffer) >= sdk._batch_size else None)
+    return True
