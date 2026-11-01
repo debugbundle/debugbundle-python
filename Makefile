@@ -36,6 +36,11 @@ smoke-docker:
 native-runtime-docker:
 	docker run --rm --mount "type=bind,source=$(CURDIR),target=/workspace,readonly" -w /workspace $(PYTHON_IMAGE) sh -c 'python --version && python smoke/run_app_driven_smoke.py --wheel "$(WHEEL_PATH)"'
 
+# Isolate runtime-specific coverage from the default development environment.
+.PHONY: runtime-coverage-docker
+runtime-coverage-docker:
+	$(DOCKER_RUN) sh -c 'python -m venv /tmp/debugbundle-coverage && /tmp/debugbundle-coverage/bin/pip install -e ".[dev]" >/dev/null && mkdir -p .tmp && /tmp/debugbundle-coverage/bin/pytest --cov=src/debugbundle --cov-report=json:.tmp/runtime-coverage.json -q && /tmp/debugbundle-coverage/bin/python scripts/check_coverage.py .tmp/runtime-coverage.json'
+
 .PHONY: evidence-performance
 evidence-performance:
 	docker run --rm --network none -v "$(CURDIR):/workspace:ro" -w /workspace -e PYTHONPATH=/workspace/src $(PYTHON_IMAGE) .venv-docker/bin/python perf/evidence_capture.py

@@ -109,13 +109,17 @@ def test_native_traceback_depth_and_group_width_do_not_exceed_the_contract() -> 
 
 
 def test_escaped_messages_shrink_and_tiny_remaining_budgets_withhold_optional_evidence() -> None:
-    group_type = getattr(builtins, "ExceptionGroup", None)
-    if group_type is None:
-        return
-    group = group_type("original", [RuntimeError("\x01" * 2000) for _ in range(5)])
-    graph = snapshot_exception(group, budget_bytes=1024)
+    # Budget enforcement also applies on Python 3.10, which has no native groups.
+    error = RuntimeError("\x01" * 2000)
+    for _ in range(3):
+        parent = RuntimeError("\x01" * 2000)
+        parent.__cause__ = error
+        error = parent
+    outer = RuntimeError("original")
+    outer.__cause__ = error
+    graph = snapshot_exception(outer, budget_bytes=1024)
     assert graph is not None
     assert graph["nodes"][0]["message"] == "original"
     assert graph["unavailable_reason"] == "budget_exceeded"
     assert len(json.dumps(graph, ensure_ascii=False, separators=(",", ":")).encode()) <= 1024
-    assert snapshot_exception(group, budget_bytes=100) is None
+    assert snapshot_exception(outer, budget_bytes=100) is None
