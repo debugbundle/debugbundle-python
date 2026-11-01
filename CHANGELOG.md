@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-01
+
 - Validate complete canonical hook envelopes using a vendored runtime schema;
   own native JSON replacements and revalidate after mandatory privacy. Withhold
   exhausted/unfit valid replacements without restoring pre-hook content.

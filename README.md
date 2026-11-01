@@ -18,16 +18,15 @@ Use this package to capture Python backend exceptions, request metadata, structu
 
 Requires Python 3.10 or newer.
 
-## Evidence candidate (unreleased)
+## Evidence in 2.1.0
 
-The source candidate adds `capture_exception_evidence=True` and
+Version 2.1.0 adds `capture_exception_evidence=True` and
 `capture_recovery_observations=False` installation options. Collection requires
 verified delivery/reader support, discovered on existing config/ACK traffic with
 `debugbundle_evidence=1`. No capture call performs discovery or adds polling.
 `evidence_capabilities` is an optional descriptor pin asserting the **entire**
 path, including local readers, relays and wrappers; later discovery can revoke it.
-Without proof, exception events retain their legacy shape. These additions are
-not available in the installed 2.0.1 release.
+Without proof, exception events retain their legacy shape. These additions require upgrading from 2.0.1 to 2.1.0.
 
 Native cause, implicit context and Python 3.11+ exception-group evidence excludes
 locals, source excerpts, arbitrary renderers and application properties. Python
@@ -48,7 +47,7 @@ Application results and exceptions pass through the context manager unchanged.
 The existing background sender remains best-effort at immediate process exit.
 The uncaught hook collects bounded native evidence without waiting for transport;
 applications needing a delivery attempt use explicit `flush()` in a controlled
-shutdown window. This candidate does not add default crash-file persistence or
+shutdown window. This release does not add default crash-file persistence or
 synchronous capture transport.
 
 Pass a fresh UUID v4 `failure_ref` in exception/log/request context. A valid
