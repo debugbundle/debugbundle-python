@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import inspect
 import logging
+import sys
 from contextvars import ContextVar
 from typing import Any
 
@@ -19,6 +20,17 @@ def _capture(sdk: Any, active: list[bool], name: str, record: dict[str, Any]) ->
         context = dict(record)
         message = str(context.pop("event", ""))
         level = {"warn": "warning", "exception": "error", "fatal": "critical"}.get(name, name)
+        info = context.get("exc_info")
+        if info is True:
+            info = sys.exc_info()
+        error = info[1] if type(info) is tuple and len(info) == 3 else info
+        if level in {"error", "critical"} and isinstance(error, BaseException) and hasattr(sdk, "capture_exception"):
+            eligible = getattr(sdk, "_log_level_eligible", None)
+            if callable(eligible) and not eligible(level):
+                return
+            context.pop("exc_info", None)
+            sdk.capture_exception(error, {**context, "logger_name": "structlog", "log_message": message})
+            return
         sdk.capture_log(message, level=level, context=context or None)
     except Exception:
         # A logger adapter must not throw into the application's logging path.
@@ -61,8 +73,10 @@ class StructlogLoggerProxy:
         if not callable(attribute):
             return attribute
         if name in _BIND_METHODS:
+
             def bind(*args: Any, **kwargs: Any) -> StructlogLoggerProxy:
                 return StructlogLoggerProxy(attribute(*args, **kwargs), self._sdk, self._active)
+
             return bind
         method_name = name[1:] if name.startswith("a") else name
         if method_name not in _LOG_METHODS:
@@ -84,6 +98,7 @@ class StructlogLoggerProxy:
                 if args:
                     record["event"] = args[1] if method_name == "log" and len(args) > 1 else args[0]
                 processors = list(bound._processors)
+                native_info = kwargs.get("exc_info", sys.exc_info() if method_name == "exception" else None)
                 if processors:
                     last = processors[-1]
 
@@ -96,6 +111,8 @@ class StructlogLoggerProxy:
                         if isinstance(snapshot, dict):
                             record.clear()
                             record.update(snapshot)
+                            if native_info is not None:
+                                record["exc_info"] = native_info
                         return result
 
                     processors[-1] = observe
@@ -107,12 +124,15 @@ class StructlogLoggerProxy:
                 return attribute
 
         if inspect.iscoroutinefunction(attribute):
+
             async def async_log(*args: Any, **kwargs: Any) -> Any:
                 return await prepare(args, kwargs)(*args, **kwargs)
+
             return async_log
 
         def log(*args: Any, **kwargs: Any) -> Any:
             return prepare(args, kwargs)(*args, **kwargs)
+
         return log
 
     def _ensure_stdlib_handler(self, sink: Any) -> None:
@@ -136,4 +156,5 @@ class StructlogLoggerProxy:
             record = {**kwargs, **{f"arg_{i}": value for i, value in enumerate(args)}, "event": event or ""}
             _capture(self._sdk, self._active, name, record)
             return result
+
         return log

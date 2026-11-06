@@ -1,6 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [2.1.1] - 2026-11-06
+
+- Final audit: only admitted captures create identity receipts; repeated native records and rejected beforeSend attempts cannot hide later failures. Deferred hooks retain uncertain cross-call reports.
+
+- Preserve native exceptions, tracebacks and causes from stdlib logging, Loguru and structlog error records. Keep native filters and formatted log context; deduplicate logger/framework reports only within owned operations.
+- Existing event schemas remain compatible; complete exception inputs may create new future fingerprints. Consumer installations require an explicit upgrade.
 
 ## [2.1.0] - 2026-11-01
 

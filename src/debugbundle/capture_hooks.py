@@ -30,14 +30,19 @@ class DebugBundleLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if not self._sdk._log_level_eligible(record.levelname.lower()):
             return
+        context = {"logger_name": record.name, "pathname": record.pathname, "lineno": record.lineno}
+        if (
+            record.levelno >= logging.ERROR
+            and type(record.exc_info) is tuple
+            and len(record.exc_info) == 3
+            and isinstance(record.exc_info[1], BaseException)
+        ):
+            self._sdk.capture_exception(record.exc_info[1], {**context, "log_message": safe_log_message(record)})
+            return
         self._sdk.capture_log(
             safe_log_message(record),
             level=record.levelname.lower(),
-            context={
-                "logger_name": record.name,
-                "pathname": record.pathname,
-                "lineno": record.lineno,
-            },
+            context=context,
         )
 
 
@@ -55,7 +60,10 @@ def safe_log_message(record: logging.LogRecord) -> str:
     if type(args) is not tuple or len(args) > 8:
         return template + " [log arguments withheld]"
     safe_args = [
-        value[:1024] if type(value) is str else str(value) if type(value) in (int, float, bool)
+        value[:1024]
+        if type(value) is str
+        else str(value)
+        if type(value) in (int, float, bool)
         else "[unsupported argument]"
         for value in args
     ]

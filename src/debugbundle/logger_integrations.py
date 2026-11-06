@@ -75,11 +75,27 @@ def _attach_loguru(
         return None
 
     try:
+
         def sink(message: Any) -> None:
             record = getattr(message, "record", None)
             if not isinstance(record, dict):
                 return
             context = dict(record.get("extra") or {})
+            exception = record.get("exception")
+            error = exception.value if exception is not None else None
+            level = _normalize_level(str(getattr(record.get("level"), "name", "warning")))
+            if (
+                level in {"error", "critical"}
+                and isinstance(error, BaseException)
+                and hasattr(sdk, "capture_exception")
+            ):
+                eligible = getattr(sdk, "_log_level_eligible", None)
+                if callable(eligible) and not eligible(level):
+                    return
+                sdk.capture_exception(
+                    error, {**context, "logger_name": "loguru", "log_message": str(record.get("message") or "")}
+                )
+                return
             sdk.capture_log(
                 str(record.get("message") or ""),
                 level=_normalize_level(str(getattr(record.get("level"), "name", "warning"))),

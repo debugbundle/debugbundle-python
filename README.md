@@ -1,5 +1,7 @@
 # debugbundle-python
 
+Patch 2.1.1 corrects native logger exception evidence and capture safety while preserving public APIs and event schemas. Upgrade the DebugBundle distribution to adopt the correction.
+
 Python SDK for DebugBundle.
 
 After `make install-docker`, `make evidence-performance` compares identical

@@ -14,6 +14,7 @@ from .event_support import (
     runtime_process_facts,
 )
 from .exception_evidence import snapshot_exception
+from .exception_identity import admit as admit_identity
 from .exception_snapshot import exception_details
 from .process_support import ensure_current_process
 from .queue_admission import may_prepare_event
@@ -35,6 +36,9 @@ def capture_exception(
     if not sdk._enabled or not may_prepare_event(sdk, True, max_pending_events, max_pending_bytes):
         return
     try:
+        automatic = fatal or type(context) is dict and "logger_name" in context
+        if not admit_identity(sdk, error, automatic):
+            return
         name, message, stack = exception_details(error)
         redacted_context = redact_mapping(dict(context or {}), sdk._redact_fields)
         request_payload = backend_exception_request_payload(redacted_context.get("request"))
@@ -84,8 +88,10 @@ def capture_exception(
             return
         try:
             if sdk._enabled and sdk._suppression.should_capture(suppression_key, sdk._time_provider()):
-                if sdk._offer_protected_event(event, event_bytes) and fatal:
-                    sdk._hook_bypass.add(id(event))
+                if sdk._offer_protected_event(event, event_bytes):
+                    admit_identity(sdk, error, automatic, accepted=True)
+                    if fatal:
+                        sdk._hook_bypass.add(id(event))
         finally:
             sdk._lock.release()
     except BaseException:
