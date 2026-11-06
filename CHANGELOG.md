@@ -1,5 +1,7 @@
 # Changelog
 
+## [Unreleased]
+
 ## [2.1.1] - 2026-11-06
 
 - Final audit: only admitted captures create identity receipts; repeated native records and rejected beforeSend attempts cannot hide later failures. Deferred hooks retain uncertain cross-call reports.
