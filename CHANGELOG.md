@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-11-09
+
+- Redact standalone organisation invitation and ownership-transfer credentials from free text before retention or transport, using the shared 27-case privacy corpus. Preserve capture APIs, event schemas and supported platform floors.
+- Existing installations adopt this protection when explicitly upgraded.
+
 ## [2.1.1] - 2026-11-06
 
 - Final audit: only admitted captures create identity receipts; repeated native records and rejected beforeSend attempts cannot hide later failures. Deferred hooks retain uncertain cross-call reports.
