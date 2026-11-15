@@ -1,0 +1,2 @@
+recursive-include tests *.py *.json *.sha256
+include MIGRATION-2.0.md MIGRATION-3.0.md

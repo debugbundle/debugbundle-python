@@ -223,3 +223,45 @@ def test_hook_owns_nested_json_and_never_executes_application_serializers_or_equ
 )
 def test_complete_boundary_matches_accepting_evidence_corpus(fixture) -> None:
     assert _is_valid_event(fixture["event"]) == fixture["valid"]
+
+
+def test_combined_evidence_budget_never_restores_owner_removed_content():
+    corpus = json.loads(Path(__file__).with_name("fixtures").joinpath("evidence-wire-cases.json").read_text())
+    original = next(case["event"] for case in corpus["events"] if case["id"] == "legacy_error")
+    replacement = next(case["event"] for case in corpus["events"] if case["id"] == "combined_optional_bytes")
+    replacement["payload"]["message"] = "owner replacement"
+    result = apply_before_send(original, lambda _: replacement, lambda *_: None)
+    assert result is not None
+    assert result["payload"]["message"] == "owner replacement"
+    assert _is_valid_event(result)
+    assert "exception_evidence" not in result["payload"]
+    assert "exception_evidence" in replacement["payload"]
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    json.loads(Path(__file__).with_name("fixtures").joinpath("before-send-budget.json").read_text())["cases"],
+    ids=lambda item: item["id"],
+)
+def test_shared_hook_byte_boundaries(fixture):
+    corpus = json.loads(Path(__file__).with_name("fixtures").joinpath("before-send-budget.json").read_text())
+    result = apply_before_send(corpus["original"], lambda _: fixture["event"], lambda *_: None)
+    assert result is not None
+    outcome = fixture["outcome"]
+    assert result["payload"]["message"] == ("owner removed" if outcome == "fallback" else "owner replacement")
+    assert _is_valid_event(result)
+    if outcome != "fallback":
+        assert ("exception_evidence" in result["payload"]) == (outcome == "keep")
+        assert result["context"]["owner_field"] == "preserved"
+        if fixture["id"].endswith("-legacy"):
+            assert "evidence_reference" in result["context"]
+        if fixture["id"].endswith("-typed") and outcome == "reduce":
+            assert "evidence_reference" not in result["context"]
+
+
+def test_budget_reduction_does_not_repair_malformed_context():
+    corpus = json.loads(Path(__file__).with_name("fixtures").joinpath("before-send-budget.json").read_text())
+    replacement = next(item["event"] for item in corpus["cases"] if item["outcome"] == "reduce")
+    for context in (None, "invalid", []):
+        replacement["context"] = context
+        assert apply_before_send(corpus["original"], lambda _: replacement, lambda *_: None) == corpus["original"]

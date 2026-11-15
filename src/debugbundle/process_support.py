@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from .diagnostic_budget import DiagnosticCaptureBudget
 from .evidence_delivery import EvidenceDelivery
+from .internal_diagnostics import InternalDiagnostics
 from .operation_context import OperationContexts
 from .suppression import EventSuppressionTracker
 from .transport import HttpTransport
@@ -33,6 +34,8 @@ def ensure_current_process(sdk: DebugBundleSdk) -> None:
     sdk._operations = OperationContexts()
     sdk._evidence = EvidenceDelivery()
     sdk._diagnostics = DiagnosticCaptureBudget()
+    sdk._internal_diagnostics = InternalDiagnostics()
+    sdk._internal_diagnostics.configure(sdk._on_diagnostic)
     sdk._hook_bypass = set()
     sdk._sending = False
     sdk._inflight_count = 0

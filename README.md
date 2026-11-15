@@ -1,6 +1,6 @@
 # debugbundle-python
 
-Patch 2.1.3 protects invitation and organisation-transfer credentials in captured text while preserving public APIs and event schemas. Upgrade the DebugBundle distribution to adopt the protection.
+Version 3.0.0 preserves hook redaction during optional-evidence overflow and contains local diagnostics. Optional diagnostic callbacks now run on a bounded background lane; review the [migration guide](MIGRATION-3.0.md) before upgrading from 2.x.
 
 Python SDK for DebugBundle.
 
@@ -472,3 +472,21 @@ Python `tracemalloc` peak/live allocation measurements, verifies native causes a
 original-error priority, and checks existing retention ceilings. Setup and cleanup
 are excluded; traced allocations are Python-managed memory, not cumulative churn
 or total process RSS.
+
+### Hook size limits (unreleased correction)
+
+A hook replacement whose optional exception evidence exceeds the combined 32 KiB
+UTF-8 JSON budget keeps its replacement message and other primary fields. The SDK
+omits the oversized optional evidence and its typed reference, recording
+`context.evidence_limits`. Ordinary custom context remains intact. A size limit
+must not restore text removed by the hook; an otherwise valid replacement that
+cannot fit later ownership or transport limits is withheld. Malformed returns and
+throwing hooks retain the established protected-original fallback.
+
+### Internal SDK diagnostics
+
+Python 3.0 changes optional diagnostic callback timing. See the
+[Python 3.0 migration guide](MIGRATION-3.0.md) before upgrading code that depends
+on callback thread affinity or completion during `flush()`.
+
+Internal diagnostics are optional and local through `on_diagnostic`; the SDK has no separate maintainer-reporting channel. Callbacks now run on one bounded daemon lane per client, outside SDK locks. Capture and `flush()` do not wait for diagnostic completion. At most one diagnostic is pending, ten are admitted per 60-second window, and each is at most 4 KiB of sanitised UTF-8 JSON, including custom privacy fields. Diagnostic callback logs are excluded from capture. A stalled callback keeps its lane across reinitialisation; no replacement worker is created. Disposal/reinitialisation clears pending output, while an already running callback may finish. Callbacks retain a synchronous return contract; accidental native coroutine returns are closed without execution.

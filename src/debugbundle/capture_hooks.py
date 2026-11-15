@@ -7,13 +7,16 @@ import re
 import time
 from typing import TYPE_CHECKING
 
+from .internal_diagnostics import in_diagnostic
 from .process_support import ensure_current_process
 
 if TYPE_CHECKING:
     from .core import DebugBundleSdk
 
 
-def try_capture_lock(sdk: DebugBundleSdk) -> bool:
+def try_capture_lock(sdk: DebugBundleSdk, *, allow_diagnostic: bool = False) -> bool:
+    if in_diagnostic() and not allow_diagnostic:
+        return False
     ensure_current_process(sdk)
     for _ in range(8):
         if sdk._lock.acquire(blocking=False):

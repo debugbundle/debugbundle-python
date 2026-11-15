@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Protocol
 
+from .internal_diagnostics import error_detail
+from .redaction import sanitize_telemetry
 from .structlog_integration import StructlogLoggerProxy as _StructlogLoggerProxy
 
 
@@ -128,15 +130,12 @@ def _emit_diagnostic(
 ) -> None:
     if on_diagnostic is None:
         return
-    on_diagnostic(
-        {
+    try:
+        diagnostic = {
             "code": "logger_attach_failed",
             "message": "sdk-python failed to attach a logger integration",
-            "metadata": {
-                "error": {
-                    "name": type(error).__name__,
-                    "message": str(error),
-                }
-            },
+            "metadata": {"error": error_detail(error)},
         }
-    )
+        on_diagnostic(sanitize_telemetry(diagnostic))
+    except BaseException:
+        return

@@ -7,19 +7,21 @@ from collections.abc import Callable
 from typing import cast
 
 from .canonical_event import EXHAUSTED, INVALID, ValidationBudgetExceeded, own_json, valid_owned_event
-from .evidence_wire import validate_evidence
+from .evidence_wire import fit_hook_evidence, validate_evidence
 
 BeforeSendHook = Callable[[dict[str, object]], dict[str, object] | None]
 _MOBILE = ("@debugbundle/sdk-android", "@debugbundle/sdk-swift", "@debugbundle/sdk-react-native")
 
 
-def _normalized(event: object) -> object:
+def _normalized(event: object, *, reduce_evidence: bool = False) -> object:
     if type(event) is not dict:
         return INVALID
     owned = own_json(event)
     if owned is INVALID or owned is EXHAUSTED:
         return owned
     try:
+        if reduce_evidence:
+            owned = fit_hook_evidence(owned)
         if not valid_owned_event(owned) or not validate_evidence(owned):
             return INVALID
         # The accepting Zod contract refines this condition outside JSON Schema.
@@ -48,7 +50,7 @@ def apply_before_send(
         return event
     if result is None:
         return None
-    checked = _normalized(result)
+    checked = _normalized(result, reduce_evidence=True)
     if checked is EXHAUSTED:
         return None
     if checked is INVALID:

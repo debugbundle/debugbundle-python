@@ -44,6 +44,7 @@ from .evidence_delivery import EvidenceDelivery, add_reference, filter_evidence
 from .evidence_wire import validate_evidence, without_optional
 from .exception_capture import capture_exception as capture_native_exception
 from .flush_delivery import flush_sdk
+from .internal_diagnostics import InternalDiagnostics, in_diagnostic
 from .logger_integrations import attach_optional_integrations
 from .operation_context import OperationContexts
 from .probe_capture import ProbeEntry, capture_probe
@@ -132,6 +133,7 @@ class DebugBundleSdk:
         self._async_handlers: dict[asyncio.AbstractEventLoop, Any] = {}
         self._fetch_impl: Callable[[str, dict[str, object]], ConfigFetchResponse] | None = None
         self._on_diagnostic: Callable[[dict[str, object]], None] | None = None
+        self._internal_diagnostics = InternalDiagnostics()
         self._before_send: BeforeSendHook | None = None
         self._configured_probes_poll_interval_ms = DEFAULT_PROBES_POLL_INTERVAL_MS
         self._remote_config_etag: str | None = None
@@ -226,6 +228,7 @@ class DebugBundleSdk:
             self._consecutive_failures = 0
             self._fetch_impl = fetch_impl
             self._on_diagnostic = on_diagnostic
+            self._internal_diagnostics.configure(on_diagnostic)
             self._before_send = before_send
             self._configured_probes_poll_interval_ms = max(1, int(probes_poll_interval))
             self._remote_config_etag = None
@@ -357,7 +360,7 @@ class DebugBundleSdk:
         try:
             ensure_current_process(self)
             protected = sanitize_telemetry({key: value}, self._redact_fields)
-            if not isinstance(protected, dict) or not try_capture_lock(self):
+            if not isinstance(protected, dict) or not try_capture_lock(self, allow_diagnostic=True):
                 return
             try:
                 next_context = dict(self._context)
@@ -389,6 +392,8 @@ class DebugBundleSdk:
         return self._operations.context(options)
 
     def flush(self) -> None:
+        if in_diagnostic():
+            return
         flush_sdk(self, MAX_PENDING_EVENTS, MAX_PENDING_BYTES)
 
     def probe(self, label: str, data: object | Callable[[], object], opts: Mapping[str, object] | None = None) -> None:
@@ -418,13 +423,13 @@ class DebugBundleSdk:
             logger_id = id(target_logger)
             if logger_id in self._logging_bindings:
                 if not self._optional_logging_restorers:
-                    self._optional_logging_restorers = attach_optional_integrations(self, self._on_diagnostic)
+                    self._optional_logging_restorers = attach_optional_integrations(self, self._receive_diagnostic)
                 return
             handler = DebugBundleLogHandler(self)
             target_logger.addHandler(handler)
             self._logging_bindings[logger_id] = (target_logger, handler)
             if not self._optional_logging_restorers:
-                self._optional_logging_restorers = attach_optional_integrations(self, self._on_diagnostic)
+                self._optional_logging_restorers = attach_optional_integrations(self, self._receive_diagnostic)
 
     def capture_async(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         ensure_current_process(self)
@@ -446,6 +451,8 @@ class DebugBundleSdk:
 
     def dispose(self) -> None:
         ensure_current_process(self)
+        self._internal_diagnostics.configure(None)
+        self._on_diagnostic = None
         with self._lock:
             self._operations.clear()
             self._evidence = EvidenceDelivery()
@@ -660,16 +667,8 @@ class DebugBundleSdk:
         self._remote_config_timer.daemon = True
         self._remote_config_timer.start()
 
+    def _receive_diagnostic(self, diagnostic: dict[str, object]) -> None:
+        self._internal_diagnostics.emit(diagnostic, self._redact_fields)
+
     def _emit_diagnostic(self, code: str, message: str, metadata: dict[str, object] | None = None) -> None:
-        if self._on_diagnostic is None:
-            return
-        diagnostic: dict[str, object] = {"code": code, "message": message}
-        if metadata is not None:
-            try:
-                diagnostic["metadata"] = sanitize_telemetry(metadata, self._redact_fields)
-            except UnsafeTelemetry:
-                pass
-        try:
-            self._on_diagnostic(diagnostic)
-        except Exception:
-            return
+        self._receive_diagnostic({"code": code, "message": message, **({"metadata": metadata} if metadata else {})})

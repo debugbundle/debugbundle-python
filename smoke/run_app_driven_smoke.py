@@ -335,8 +335,44 @@ def _run_installed_evidence_smoke(schema_path: Path) -> None:
         server.close()
 
 
+def _run_installed_diagnostics_smoke() -> None:
+    from types import SimpleNamespace
+
+    from debugbundle import DebugBundleSdk
+
+    events = []
+    called = threading.Event()
+
+    def transport(request):
+        events.extend(request["events"])
+        return SimpleNamespace(status_code=202, retry_after_ms=None)
+
+    def hook(_event):
+        raise RuntimeError("synthetic hook failure")
+
+    sdk = DebugBundleSdk(transport=transport)
+
+    def diagnostic(_value):
+        sdk.capture_log("internal diagnostic", "error")
+        called.set()
+        raise RuntimeError("synthetic diagnostic failure")
+
+    sdk.init(PROJECT_TOKEN, before_send=hook, on_diagnostic=diagnostic)
+    try:
+        sdk.capture_log("installed application error", "error")
+        sdk.flush()
+        if not called.wait(2):
+            raise AssertionError("Installed diagnostic callback did not run")
+        sdk.flush()
+        if [event["payload"]["message"] for event in events] != ["installed application error"]:
+            raise AssertionError("Installed diagnostic callback recursively captured SDK failure")
+    finally:
+        sdk.dispose()
+
+
 def _run_installed_smoke(schema_path: Path) -> None:
     _run_installed_fork_smoke()
+    _run_installed_diagnostics_smoke()
     _run_installed_evidence_smoke(schema_path)
     from flask import Flask, jsonify
     from jsonschema.validators import validator_for

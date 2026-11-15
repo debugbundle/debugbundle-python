@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-15
+
+### Breaking
+
+- Optional `on_diagnostic` callbacks execute asynchronously on one bounded daemon lane. `flush()` waits for event delivery only; it no longer waits for diagnostic callback completion. See [the Python 3 migration guide](MIGRATION-3.0.md).
+
+### Fixed
+
+- Contain logger diagnostic failures, sanitise bounded details and prevent recursive capture. Optional diagnostic callbacks run on one bounded daemon lane outside SDK locks; flush no longer waits for diagnostic output. Preserve hook, capture and retry contracts.
+
+- Preserve invalid-return fallback when optional evidence is both malformed and oversized; cover mixed evidence fields with the shared hook-budget corpus.
+
+- Preserve application `beforeSend` redaction when optional exception evidence exceeds the combined 32 KiB UTF-8 JSON limit. Reduce optional evidence before invalid-return fallback, retain the replacement primary and ordinary custom context, and remove a related typed reference. Exact-boundary and malformed-return regressions cover the unchanged receiving contract.
+
+
 ## [2.1.3] - 2026-11-15
 
 - Align installation, initialization, integrations, first-event verification and configuration documentation with the shared SDK pattern. Keep credentials, delivery modes and runtime lifecycle requirements explicit.

@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .config import MINIMAL_CAPTURE_POLICY, parse_remote_config
-from .event_support import sdk_config_endpoint, serialize_error
+from .event_support import sdk_config_endpoint
 from .evidence_http import evidence_url
+from .internal_diagnostics import error_detail
 
 if TYPE_CHECKING:
     from .core import DebugBundleSdk
@@ -74,7 +75,7 @@ def refresh_remote_config(sdk: DebugBundleSdk, initial: bool = False) -> None:
             sdk._emit_diagnostic(
                 "remote_probe_config_failed",
                 "sdk-python failed to refresh remote probe config",
-                metadata={"error": serialize_error(failure) if isinstance(failure, Exception) else "fetch_failed"},
+                metadata={"error": error_detail(failure)},
             )
             if initial:
                 sdk._capture_policy = MINIMAL_CAPTURE_POLICY

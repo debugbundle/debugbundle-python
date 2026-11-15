@@ -245,7 +245,7 @@ def execution(value: Any) -> bool:
     )
 
 
-def graph(value: Any) -> bool:
+def graph(value: Any, *, check_byte_budget: bool = True) -> bool:
     if (
         not _closed(value, ("version", "runtime", "root_id", "nodes", "truncated", "unavailable_reason"))
         or not _integer(value["version"], 1, 1)
@@ -329,10 +329,11 @@ def graph(value: Any) -> bool:
         visited.add(node_id)
         return all(visit(child, depth + 1, ancestors | {node_id}) for child in adjacency[node_id])
 
-    return visit(value["root_id"], 0, set()) and len(visited) == len(adjacency) and _size(value) <= 32768
+    return (visit(value["root_id"], 0, set()) and len(visited) == len(adjacency)
+            and (not check_byte_budget or _size(value) <= 32768))
 
 
-def validate_evidence(event: dict[str, Any]) -> bool:
+def validate_evidence(event: dict[str, Any], *, check_byte_budget: bool = True) -> bool:
     if not _mapping(event):
         return False
     payload = event.get("payload")
@@ -356,7 +357,9 @@ def validate_evidence(event: dict[str, Any]) -> bool:
             ) or (field != "execution" and _one_of(event.get("event_type"), ("frontend_exception",)))
             if not allowed:
                 return False
-            if not validator(payload[field]):
+            valid = (graph(payload[field], check_byte_budget=check_byte_budget)
+                     if field == "exception_evidence" else validator(payload[field]))
+            if not valid:
                 return False
             additions[field] = payload[field]
     if not additions:
@@ -365,7 +368,40 @@ def validate_evidence(event: dict[str, Any]) -> bool:
     selected = reference(context.get("evidence_reference")) if _mapping(context) else None
     if selected is not None:
         additions["evidence_reference"] = selected
-    return _size(additions) <= 32768
+    return not check_byte_budget or _size(additions) <= 32768
+
+
+def fit_hook_evidence(event: dict[str, Any]) -> dict[str, Any]:
+    """Reduce owned optional bytes before a hook can fall back to pre-hook text."""
+    payload = event.get("payload")
+    if event.get("event_type") not in ("backend_exception", "frontend_exception") or not _mapping(payload):
+        return event
+    additions = {
+        key: payload[key] for key in ("exception_evidence", "execution", "resource_observations") if key in payload
+    }
+    if not additions:
+        return event
+    context = event.get("context")
+    if "context" in event and not _mapping(context):
+        return event
+    selected = reference(context.get("evidence_reference")) if _mapping(context) else None
+    if selected is not None:
+        additions["evidence_reference"] = selected
+    if _size(additions) <= 32768:
+        return event
+    if not validate_evidence(event, check_byte_budget=False):
+        return event
+    reduced = without_optional(event)
+    assert reduced is not None
+    context = dict(context) if _mapping(context) else {}
+    if selected is not None:
+        context.pop("evidence_reference", None)
+    context["evidence_limits"] = {
+        "version": 1,
+        **{key: "budget_exceeded" for key in additions if key != "evidence_reference"},
+    }
+    reduced["context"] = context
+    return reduced
 
 
 def without_optional(event: dict[str, Any]) -> dict[str, Any] | None:

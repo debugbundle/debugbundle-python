@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .evidence_delivery import reconcile_diagnostic
+from .internal_diagnostics import in_diagnostic
 
 if TYPE_CHECKING:
     from .core import DebugBundleSdk
@@ -25,6 +26,8 @@ def high_priority_event(event: dict[str, object]) -> bool:
 
 
 def may_prepare_event(sdk: DebugBundleSdk, high_priority: bool, max_events: int, max_bytes: int) -> bool:
+    if in_diagnostic():
+        return False
     if len(sdk._buffer) < max_events and sdk._buffer_bytes < max_bytes:
         return True
     if high_priority and sdk._pending_low_priority > 0:

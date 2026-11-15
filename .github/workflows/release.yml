@@ -113,6 +113,11 @@ jobs:
       - name: Build package artifacts
         run: python -m build
 
+      - name: Validate source distribution resources and migration guides
+        run: python scripts/check_source_distribution.py dist/debugbundle_python-${RELEASE_VERSION}.tar.gz
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
       - name: App-driven smoke test built artifacts
         run: python smoke/run_app_driven_smoke.py --wheel dist/debugbundle_python-${RELEASE_VERSION}-py3-none-any.whl
         env:

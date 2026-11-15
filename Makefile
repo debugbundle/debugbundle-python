@@ -20,7 +20,11 @@ format-focused:
 	$(DOCKER_RUN) sh -c '.venv-docker/bin/ruff check --select I --fix $(FORMAT_FILES) && .venv-docker/bin/ruff format $(FORMAT_FILES)'
 
 check-docker:
-	$(DOCKER_RUN) sh -c '.venv-docker/bin/ruff check . && .venv-docker/bin/mypy src && .venv-docker/bin/pytest --cov=src/debugbundle --cov-report=term-missing --cov-report=json:coverage.json -q && .venv-docker/bin/python scripts/check_coverage.py coverage.json && .venv-docker/bin/python -m build'
+	$(DOCKER_RUN) sh -c '.venv-docker/bin/ruff check . && .venv-docker/bin/mypy src && .venv-docker/bin/pytest --cov=src/debugbundle --cov-report=term-missing --cov-report=json:coverage.json -q && .venv-docker/bin/python scripts/check_coverage.py coverage.json && .venv-docker/bin/python -m build && .venv-docker/bin/python scripts/check_source_distribution.py dist/debugbundle_python-$(PACKAGE_VERSION).tar.gz'
+
+.PHONY: source-distribution-check
+source-distribution-check:
+	$(DOCKER_RUN) python scripts/check_source_distribution.py dist/debugbundle_python-$(PACKAGE_VERSION).tar.gz
 
 .PHONY: smoke
 
