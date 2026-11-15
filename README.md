@@ -1,6 +1,6 @@
 # debugbundle-python
 
-Version 3.0.0 preserves hook redaction during optional-evidence overflow and contains local diagnostics. Optional diagnostic callbacks now run on a bounded background lane; review the [migration guide](MIGRATION-3.0.md) before upgrading from 2.x.
+Version 3.0.0 preserves hook redaction during optional-evidence overflow and contains local diagnostics. Optional diagnostic callbacks now run on a bounded background lane; review the [migration guide](https://github.com/debugbundle/debugbundle-python/blob/v3.0.0/MIGRATION-3.0.md) before upgrading from 2.x.
 
 Python SDK for DebugBundle.
 
@@ -265,7 +265,7 @@ context, policy and authentication rejections do not use this fallback.
 Framework relay adapters read at most the configured body limit plus one byte
 before parsing, and preserve the negotiation query/header through the handler.
 
-Version 2.0.0 protects capture callers with bounded, priority-aware background delivery. Review the [2.0 migration guide](MIGRATION-2.0.md) before upgrading from 1.x.
+Version 2.0.0 protects capture callers with bounded, priority-aware background delivery. Review the [2.0 migration guide](https://github.com/debugbundle/debugbundle-python/blob/v3.0.0/MIGRATION-2.0.md) before upgrading from 1.x.
 
 ## Automatic capture and application filtering
 
@@ -486,7 +486,7 @@ throwing hooks retain the established protected-original fallback.
 ### Internal SDK diagnostics
 
 Python 3.0 changes optional diagnostic callback timing. See the
-[Python 3.0 migration guide](MIGRATION-3.0.md) before upgrading code that depends
+[Python 3.0 migration guide](https://github.com/debugbundle/debugbundle-python/blob/v3.0.0/MIGRATION-3.0.md) before upgrading code that depends
 on callback thread affinity or completion during `flush()`.
 
 Internal diagnostics are optional and local through `on_diagnostic`; the SDK has no separate maintainer-reporting channel. Callbacks now run on one bounded daemon lane per client, outside SDK locks. Capture and `flush()` do not wait for diagnostic completion. At most one diagnostic is pending, ten are admitted per 60-second window, and each is at most 4 KiB of sanitised UTF-8 JSON, including custom privacy fields. Diagnostic callback logs are excluded from capture. A stalled callback keeps its lane across reinitialisation; no replacement worker is created. Disposal/reinitialisation clears pending output, while an already running callback may finish. Callbacks retain a synchronous return contract; accidental native coroutine returns are closed without execution.
