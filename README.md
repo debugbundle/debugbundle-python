@@ -1,16 +1,8 @@
 # debugbundle-python
 
-Patch 2.1.2 protects invitation and organisation-transfer credentials in captured text while preserving public APIs and event schemas. Upgrade the DebugBundle distribution to adopt the protection.
+Patch 2.1.3 protects invitation and organisation-transfer credentials in captured text while preserving public APIs and event schemas. Upgrade the DebugBundle distribution to adopt the protection.
 
 Python SDK for DebugBundle.
-
-After `make install-docker`, `make evidence-performance` compares identical
-exception/recovery calls with evidence disabled and enabled, including a full
-warning queue, with networking disabled. It reports capture timing separately from
-Python `tracemalloc` peak/live allocation measurements, verifies native causes and
-original-error priority, and checks existing retention ceilings. Setup and cleanup
-are excluded; traced allocations are Python-managed memory, not cumulative churn
-or total process RSS.
 
 ![PyPI](https://img.shields.io/pypi/v/debugbundle-python?label=pypi)
 ![CI](https://img.shields.io/github/actions/workflow/status/debugbundle/debugbundle-python/ci.yml?branch=main&label=ci)
@@ -19,6 +11,172 @@ or total process RSS.
 Use this package to capture Python backend exceptions, request metadata, structured logs, runtime context, and probe data. It supports vanilla Python plus Django, Flask, FastAPI, Python logging, structlog, loguru, and browser relay helpers.
 
 Requires Python 3.10 or newer.
+
+## Installation
+
+```bash
+pip install debugbundle-python
+```
+
+Install the SDK alongside the framework you actually run:
+
+```bash
+pip install debugbundle-python django
+pip install debugbundle-python flask
+pip install debugbundle-python fastapi uvicorn
+```
+
+For local development:
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Initialize
+
+<a id="quick-start"></a>
+
+Initialize once at application startup with `DEBUGBUNDLE_PROJECT_TOKEN` set in the server environment. Initialization installs the exception hooks. Add logging and framework adapters in Integrations.
+
+```python
+import os
+import debugbundle
+
+debugbundle.init(
+    project_token=os.environ["DEBUGBUNDLE_PROJECT_TOKEN"],
+    environment="production",
+    service="api",
+)
+```
+
+## Integrations
+
+Django, Flask, FastAPI, Python logging, structlog, loguru and browser relay helpers are supported.
+
+### Capture hooks
+
+```python
+debugbundle.capture_exceptions()
+debugbundle.capture_logging()
+```
+
+### Capture setup details
+
+Capture handled errors, logs, messages, and probes explicitly:
+
+```python
+debugbundle.capture_exception(error)
+debugbundle.capture_log("payment retry failed", level="warning", context={"order_id": order_id})
+debugbundle.capture_message("worker started")
+debugbundle.probe("checkout.cart", {"item_count": len(cart.items)})
+
+# Use only during controlled teardown or tests, never on a request path.
+debugbundle.flush()
+```
+
+### Framework Integrations
+
+| Framework | Integration |
+| --- | --- |
+| Django | `DebugBundleDjangoMiddleware` |
+| Flask | `instrument_flask(app)` |
+| FastAPI | `DebugBundleFastAPIMiddleware` or `instrument_fastapi(app)` |
+| Python logging | `capture_logging()` |
+| asyncio | `capture_async()` |
+| structlog/loguru | Auto-detected when log capture is enabled and the libraries are installed |
+
+### Browser Relay
+
+Python backends can host the browser relay endpoint used by `@debugbundle/sdk-browser`.
+
+| Framework | Helper |
+| --- | --- |
+| Django | `create_django_relay_view()` |
+| Flask | `create_flask_relay_handler()` |
+| FastAPI | `create_fastapi_relay_handler()` |
+
+The relay validates JSON batches, enforces same-origin or allowed origins, strips trust-sensitive browser fields, keeps the server-side project token private, and supports both local-only file writes and connected forwarding.
+
+Relay defaults and limits:
+
+- Same-origin requests are allowed by default when `allowed_origins` is omitted.
+- Split frontend/backend deployments should set explicit `allowed_origins` values.
+- Relay requests must use `Content-Type: application/json` and stay below `max_body_bytes` (default `262144`).
+- Relay rate limiting defaults to `60` requests per IP per minute.
+- `project_mode="local-only"` writes accepted browser events to `.debugbundle/local/events` or your configured `local_events_dir`.
+- `project_mode="connected"` writes durable spool files by default and forwards with the server-side `project_token` only.
+- Leaving relay `project_mode` unset disables local writes and forwarding; accepted batches are only surfaced through `on_accept`.
+- Connected relay mode without a usable `project_token` keeps accepting and optionally spooling events, but forwarding remains disabled until the server provides credentials.
+
+## First-event verification
+
+Use an explicit setup event in a development or staging application, then confirm the matching service and environment in a received event or incident. Initialization, a healthy status and an empty queue are not delivery receipts. Keep the application running long enough for delivery; use bounded flushing only in tests or controlled teardown, never in a request handler.
+
+Use the repo-local smoke target to prove a fresh install end to end against a mock ingestion endpoint:
+
+```bash
+make smoke
+```
+
+That command builds the wheel, installs it into a fresh virtualenv, runs a Flask app that emits an application-owned `capture_message()` event, sends a browser relay batch through `/debugbundle/browser`, validates the emitted Python events against the SDK event-envelope fixture, and confirms both paths reach the mock ingestion endpoint with the expected `service`, `environment`, SDK metadata, and correlation fields.
+
+For a manual verification snippet inside your own app:
+
+```python
+import os
+import debugbundle
+
+debugbundle.init(
+    project_token=os.environ["DEBUGBUNDLE_PROJECT_TOKEN"],
+    service="checkout-api",
+    environment="staging",
+)
+
+debugbundle.capture_message("debugbundle first-event verification", level="error")
+debugbundle.flush()
+print(debugbundle.get_status(), debugbundle.get_last_event_at())
+```
+
+For connected delivery, confirm the event in DebugBundle and inspect its incident with the CLI. For local-only browser relay files, run `debugbundle process` and `debugbundle inspect <incident-id>` in the backend repository. A local file or mock endpoint receipt proves only that destination; it does not prove cloud acceptance.
+
+## Configuration
+
+The built-in application client uses HTTP in every environment. A literal `local` token does not select file transport. Browser relay local-only files are a separate delivery path; use a real ingestion token and endpoint for backend capture.
+
+<a id="configuration-reference"></a>
+
+Configuration sources and precedence:
+
+- The SDK only reads the keyword arguments passed to `debugbundle.init(...)`.
+- Environment variables, Django settings, Flask config, or FastAPI settings are convenience sources that your application maps into `debugbundle.init(...)`; the SDK does not read them directly.
+- Explicit `debugbundle.init(...)` arguments always win because they are the only configuration source the runtime consumes.
+- Capture-policy fields are server-owned and are not accepted in local SDK config. The SDK learns capture policy through `GET /v1/sdk/config` and applies it locally before transport.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `project_token` | required for connected capture | Write-only DebugBundle project token. Blank or missing tokens disable connected capture and leave the SDK status at `disconnected`. |
+| `service` | auto/default service | Service name shown on incidents and bundles. |
+| `environment` | `development` | Runtime environment such as `production`, `staging`, or `development`. |
+| `endpoint` | `https://api.debugbundle.com/v1/events` | Ingestion endpoint for connected mode or self-hosting. |
+| `enabled` | `True` | Disable all capture without removing instrumentation. |
+| `log_level` | `warning` | Minimum captured log severity. |
+| `sample_rate` | `1.0` | Fraction of events to keep before transport. |
+| `batch_size` | `25` | Events per batch before flushing. |
+| `flush_interval` | `5.0` | Flush interval in seconds. |
+| `redact_fields` | common sensitive fields | Additional field names to redact. |
+| `max_probe_labels` | `50` | Maximum distinct probe labels buffered in memory. |
+| `max_probe_entries_per_label` | `10` | Maximum entries retained per probe label. |
+| `probe_flush_on_error` | `True` | Attach buffered probe data to captured exceptions. |
+| `probes_poll_interval` | `60000` | Remote probe config poll interval in milliseconds. |
+| `fetch_impl` | internal HTTP fetch | Custom remote-config fetch function for tests or advanced routing. |
+| `on_diagnostic` | none | Callback for SDK internal diagnostics. |
+
+Framework-native wiring:
+
+- Django: initialize the SDK during startup, then add `DebugBundleDjangoMiddleware` to `MIDDLEWARE`.
+- Flask: initialize the SDK during app creation, then call `instrument_flask(app)`.
+- FastAPI: initialize the SDK during startup, then add `DebugBundleFastAPIMiddleware` or call `instrument_fastapi(app)`.
+- There is no separate package-manager plugin, settings loader, or framework-only config surface in V1.
 
 ## Evidence in 2.1.0
 
@@ -112,123 +270,6 @@ Version 2.0.0 protects capture callers with bounded, priority-aware background d
 ## Automatic capture and application filtering
 
 `capture_logging()` attaches the stdlib logging handler and detects installed structlog/loguru integrations. Obtain structlog loggers after attachment. Structlog level filters and `DropEvent` processors run before capture; stdlib-backed structlog loggers also honor logger filters, disabled state and `logging.disable()`. Bound context and async logging are supported. SDK disposal stops capture through cached proxies. DebugBundle has its own minimum capture level; destination-specific filters on other handlers or Loguru sinks do not configure the DebugBundle handler.
-
-## Installation
-
-```bash
-pip install debugbundle-python
-```
-
-Install the SDK alongside the framework you actually run:
-
-```bash
-pip install debugbundle-python django
-pip install debugbundle-python flask
-pip install debugbundle-python fastapi uvicorn
-```
-
-For local development:
-
-```bash
-pip install -e ".[dev]"
-```
-
-## Quick Start
-
-```python
-import os
-import debugbundle
-
-debugbundle.init(
-    project_token=os.environ["DEBUGBUNDLE_PROJECT_TOKEN"],
-    service="checkout-api",
-    environment="production",
-)
-
-debugbundle.capture_exceptions()
-debugbundle.capture_logging()
-```
-
-Capture handled errors, logs, messages, and probes explicitly:
-
-```python
-debugbundle.capture_exception(error)
-debugbundle.capture_log("payment retry failed", level="warning", context={"order_id": order_id})
-debugbundle.capture_message("worker started")
-debugbundle.probe("checkout.cart", {"item_count": len(cart.items)})
-
-# Use only during controlled teardown or tests, never on a request path.
-debugbundle.flush()
-```
-
-## Framework Integrations
-
-| Framework | Integration |
-| --- | --- |
-| Django | `DebugBundleDjangoMiddleware` |
-| Flask | `instrument_flask(app)` |
-| FastAPI | `DebugBundleFastAPIMiddleware` or `instrument_fastapi(app)` |
-| Python logging | `capture_logging()` |
-| asyncio | `capture_async()` |
-| structlog/loguru | Auto-detected when log capture is enabled and the libraries are installed |
-
-## Browser Relay
-
-Python backends can host the browser relay endpoint used by `@debugbundle/sdk-browser`.
-
-| Framework | Helper |
-| --- | --- |
-| Django | `create_django_relay_view()` |
-| Flask | `create_flask_relay_handler()` |
-| FastAPI | `create_fastapi_relay_handler()` |
-
-The relay validates JSON batches, enforces same-origin or allowed origins, strips trust-sensitive browser fields, keeps the server-side project token private, and supports both local-only file writes and connected forwarding.
-
-Relay defaults and limits:
-
-- Same-origin requests are allowed by default when `allowed_origins` is omitted.
-- Split frontend/backend deployments should set explicit `allowed_origins` values.
-- Relay requests must use `Content-Type: application/json` and stay below `max_body_bytes` (default `262144`).
-- Relay rate limiting defaults to `60` requests per IP per minute.
-- `project_mode="local-only"` writes accepted browser events to `.debugbundle/local/events` or your configured `local_events_dir`.
-- `project_mode="connected"` writes durable spool files by default and forwards with the server-side `project_token` only.
-- Leaving relay `project_mode` unset disables local writes and forwarding; accepted batches are only surfaced through `on_accept`.
-- Connected relay mode without a usable `project_token` keeps accepting and optionally spooling events, but forwarding remains disabled until the server provides credentials.
-
-## Configuration Reference
-
-Configuration sources and precedence:
-
-- The SDK only reads the keyword arguments passed to `debugbundle.init(...)`.
-- Environment variables, Django settings, Flask config, or FastAPI settings are convenience sources that your application maps into `debugbundle.init(...)`; the SDK does not read them directly.
-- Explicit `debugbundle.init(...)` arguments always win because they are the only configuration source the runtime consumes.
-- Capture-policy fields are server-owned and are not accepted in local SDK config. The SDK learns capture policy through `GET /v1/sdk/config` and applies it locally before transport.
-
-| Option | Default | Purpose |
-| --- | --- | --- |
-| `project_token` | required for connected capture | Write-only DebugBundle project token. Blank or missing tokens disable connected capture and leave the SDK status at `disconnected`. |
-| `service` | auto/default service | Service name shown on incidents and bundles. |
-| `environment` | `development` | Runtime environment such as `production`, `staging`, or `development`. |
-| `endpoint` | `https://api.debugbundle.com/v1/events` | Ingestion endpoint for connected mode or self-hosting. |
-| `enabled` | `True` | Disable all capture without removing instrumentation. |
-| `log_level` | `warning` | Minimum captured log severity. |
-| `sample_rate` | `1.0` | Fraction of events to keep before transport. |
-| `batch_size` | `25` | Events per batch before flushing. |
-| `flush_interval` | `5.0` | Flush interval in seconds. |
-| `redact_fields` | common sensitive fields | Additional field names to redact. |
-| `max_probe_labels` | `50` | Maximum distinct probe labels buffered in memory. |
-| `max_probe_entries_per_label` | `10` | Maximum entries retained per probe label. |
-| `probe_flush_on_error` | `True` | Attach buffered probe data to captured exceptions. |
-| `probes_poll_interval` | `60000` | Remote probe config poll interval in milliseconds. |
-| `fetch_impl` | internal HTTP fetch | Custom remote-config fetch function for tests or advanced routing. |
-| `on_diagnostic` | none | Callback for SDK internal diagnostics. |
-
-Framework-native wiring:
-
-- Django: initialize the SDK during startup, then add `DebugBundleDjangoMiddleware` to `MIDDLEWARE`.
-- Flask: initialize the SDK during app creation, then call `instrument_flask(app)`.
-- FastAPI: initialize the SDK during startup, then add `DebugBundleFastAPIMiddleware` or call `instrument_fastapi(app)`.
-- There is no separate package-manager plugin, settings loader, or framework-only config surface in V1.
 
 ## Install Examples by Mode
 
@@ -364,33 +405,6 @@ Post-V1 planned expansions from `spec/sdk-language-targets.md` remain out of sco
 - Three consecutive transport failures also move the status to `disconnected` until a later successful flush.
 - `debugbundle.get_last_event_at()` returns the Unix timestamp of the last successful delivery, or `None` before the first success.
 
-## First-Event Verification
-
-Use the repo-local smoke target to prove a fresh install end to end against a mock ingestion endpoint:
-
-```bash
-make smoke
-```
-
-That command builds the wheel, installs it into a fresh virtualenv, runs a Flask app that emits an application-owned `capture_message()` event, sends a browser relay batch through `/debugbundle/browser`, validates the emitted Python events against the SDK event-envelope fixture, and confirms both paths reach the mock ingestion endpoint with the expected `service`, `environment`, SDK metadata, and correlation fields.
-
-For a manual verification snippet inside your own app:
-
-```python
-import os
-import debugbundle
-
-debugbundle.init(
-    project_token=os.environ["DEBUGBUNDLE_PROJECT_TOKEN"],
-    service="checkout-api",
-    environment="staging",
-)
-
-debugbundle.capture_message("debugbundle first-event verification", level="error")
-debugbundle.flush()
-print(debugbundle.get_status(), debugbundle.get_last_event_at())
-```
-
 ## Development
 
 ```bash
@@ -447,3 +461,13 @@ The source candidate also scrubs standalone `dbundle_invite_`,
 SDK-owned retention or transmission. See the [shared qualification record](https://github.com/debugbundle/debugbundle/blob/main/spec/business-credential-redaction.md).
 Published packages keep their released behaviour until the coordinated dependency
 and distribution checks are completed and a new version is published.
+
+## Maintainer performance checks
+
+After `make install-docker`, `make evidence-performance` compares identical
+exception/recovery calls with evidence disabled and enabled, including a full
+warning queue, with networking disabled. It reports capture timing separately from
+Python `tracemalloc` peak/live allocation measurements, verifies native causes and
+original-error priority, and checks existing retention ceilings. Setup and cleanup
+are excluded; traced allocations are Python-managed memory, not cumulative churn
+or total process RSS.

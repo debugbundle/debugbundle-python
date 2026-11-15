@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-11-15
+
+- Align installation, initialization, integrations, first-event verification and configuration documentation with the shared SDK pattern. Keep credentials, delivery modes and runtime lifecycle requirements explicit.
+- Runtime APIs and capture behavior are unchanged; this patch updates distributed documentation and package version metadata.
+
+
 ## [2.1.2] - 2026-11-09
 
 - Redact standalone organisation invitation and ownership-transfer credentials from free text before retention or transport, using the shared 27-case privacy corpus. Preserve capture APIs, event schemas and supported platform floors.
