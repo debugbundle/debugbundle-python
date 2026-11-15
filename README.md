@@ -473,7 +473,7 @@ original-error priority, and checks existing retention ceilings. Setup and clean
 are excluded; traced allocations are Python-managed memory, not cumulative churn
 or total process RSS.
 
-### Hook size limits (unreleased correction)
+### Hook size limits
 
 A hook replacement whose optional exception evidence exceeds the combined 32 KiB
 UTF-8 JSON budget keeps its replacement message and other primary fields. The SDK
