@@ -127,6 +127,7 @@ jobs:
         run: python -m twine check dist/*
 
       - name: Create GitHub release
+        if: steps.published_state.outputs.state == 'none'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.release_version.outputs.value }}
