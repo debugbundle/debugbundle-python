@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-25
+
+- Add exact-key privacy to capture and Django, FastAPI, and Flask relays.
+
 ## [3.0.0] - 2026-11-15
 
 ### Breaking
