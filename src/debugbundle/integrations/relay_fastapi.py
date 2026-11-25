@@ -25,6 +25,8 @@ def create_fastapi_relay_handler(
     forward_transport: Any = None,
     evidence_capabilities: object = None,
     route_path: str = "/debugbundle/browser",
+    redact_fields: list[str] | None = None,
+    redact_exact_fields: list[str] | None = None,
 ) -> Any:
     handler = BrowserRelayHandler(
         allowed_origins=allowed_origins or [],
@@ -41,6 +43,8 @@ def create_fastapi_relay_handler(
         environment=environment,
         forward_transport=forward_transport,
         evidence_capabilities=evidence_capabilities,
+        redact_fields=redact_fields,
+        redact_exact_fields=redact_exact_fields,
     )
 
     def register(app: Any) -> None:

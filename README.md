@@ -107,6 +107,7 @@ Relay defaults and limits:
 - `project_mode="connected"` writes durable spool files by default and forwards with the server-side `project_token` only.
 - Leaving relay `project_mode` unset disables local writes and forwarding; accepted batches are only surfaced through `on_accept`.
 - Connected relay mode without a usable `project_token` keeps accepting and optionally spooling events, but forwarding remains disabled until the server provides credentials.
+- `BrowserRelayHandler` and Django/Flask/FastAPI relay helpers accept optional `redact_fields` and `redact_exact_fields` while preserving validated closed protocol structures (`browser_event`, `rejection_reason`, `exception_evidence`, `resource_observations`, `evidence_reference`, and `evidence_limits`) and scrubbing all nested free-text and URL values.
 
 ## First-event verification
 
@@ -163,7 +164,8 @@ Configuration sources and precedence:
 | `sample_rate` | `1.0` | Fraction of events to keep before transport. |
 | `batch_size` | `25` | Events per batch before flushing. |
 | `flush_interval` | `5.0` | Flush interval in seconds. |
-| `redact_fields` | common sensitive fields | Additional field names to redact. |
+| `redact_fields` | common sensitive fields | Additional field names to redact with broad segment-aware matching beyond mandatory credential rules. Validated closed SDK protocol structures are preserved while nested free-text/URL strings are still scrubbed. |
+| `redact_exact_fields` | `None` | Additional exact-key field names to redact (ASCII case-insensitive whole-key, query-parameter, and non-identifier-bounded text assignment matching with punctuation significant, e.g. `tag` redacts `tag`/`TAG` without redacting `tag_name`/`tagName`/`tag-name`). Strictly additive to mandatory rules and shares the combined 128-key / 64-char custom limit with `redact_fields`. |
 | `max_probe_labels` | `50` | Maximum distinct probe labels buffered in memory. |
 | `max_probe_entries_per_label` | `10` | Maximum entries retained per probe label. |
 | `probe_flush_on_error` | `True` | Attach buffered probe data to captured exceptions. |

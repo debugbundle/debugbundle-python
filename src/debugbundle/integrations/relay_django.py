@@ -21,6 +21,8 @@ def create_django_relay_view(
     environment: str | None = None,
     forward_transport: Any = None,
     evidence_capabilities: object = None,
+    redact_fields: list[str] | None = None,
+    redact_exact_fields: list[str] | None = None,
 ) -> Any:
     handler = BrowserRelayHandler(
         allowed_origins=allowed_origins or [],
@@ -37,6 +39,8 @@ def create_django_relay_view(
         environment=environment,
         forward_transport=forward_transport,
         evidence_capabilities=evidence_capabilities,
+        redact_fields=redact_fields,
+        redact_exact_fields=redact_exact_fields,
     )
 
     def view(request: Any) -> Any:

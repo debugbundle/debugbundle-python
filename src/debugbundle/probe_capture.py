@@ -45,18 +45,19 @@ def capture_probe(
                 return
             if label not in sdk._probe_buffers and len(sdk._probe_buffers) >= sdk._max_probe_labels:
                 return
-            redact_fields = set(sdk._redact_fields)
+            redact_fields = sdk._custom_redact_fields
+            redact_exact_fields = sdk._redact_exact_fields
             generation = sdk._generation
         finally:
             sdk._lock.release()
 
         # A host supplier, mapping iterator, privacy walk, clock, or serializer may
         # be slow or hostile. None may hold the capture lock or block exceptions.
-        protected_label = sanitize_telemetry(label, redact_fields)
+        protected_label = sanitize_telemetry(label, redact_fields, redact_exact_fields)
         value = data() if callable(data) else data
         if not isinstance(value, Mapping):
             value = {"value": value}
-        protected_value = sanitize_telemetry(dict(value), redact_fields)
+        protected_value = sanitize_telemetry(dict(value), redact_fields, redact_exact_fields)
         if not isinstance(protected_label, str) or not isinstance(protected_value, dict):
             return
         label = protected_label

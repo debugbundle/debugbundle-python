@@ -213,3 +213,160 @@ def test_unknown_relay_path_can_acquire_verified_support_from_existing_ack_traff
     assert "exception_evidence" not in calls[0]["events"][0]["payload"]
     assert handler.handle(request([event()])).status == 202
     assert "exception_evidence" in calls[1]["events"][0]["payload"]
+
+
+def test_relay_broad_redact_fields_preserves_protocol_and_html_tag_allowlist() -> None:
+    accepted: list[Any] = []
+    handler = BrowserRelayHandler(
+        evidence_capabilities=PIN,
+        redact_fields=["tag", "reference", "reason", "file"],
+        on_accept=accepted.append,
+    )
+    failure_ref = str(uuid.uuid4())
+    page_id = str(uuid.uuid4())
+    frontend = event()
+    frontend["context"] = {
+        "evidence_reference": {"version": 1, "failure_ref": failure_ref, "scope": {"kind": "page", "page_id": page_id}},
+        "evidence_limits": {"version": 1, "execution": "unsupported"},
+        "payout": {
+            "tag": "SYNTHETIC_TAG",
+            "reference": "SYNTHETIC_REF",
+            "reason": "SYNTHETIC_REASON",
+            "file": "SYNTHETIC_FILE",
+        },
+    }
+    frontend["payload"]["browser_event"] = {
+        "kind": "resource_error",
+        "message": "asset failed reason=SYNTHETIC_REASON",
+        "file_name": "https://app.example.test/app.js?file=SYNTHETIC_FILE&tag=SYNTHETIC_TAG",
+        "line_number": 12,
+        "column_number": 4,
+        "target": {
+            "tag_name": "script",
+            "source_url": "https://cdn.example.test/bundle.js?token=SYNTHETIC_TOKEN&tag=SYNTHETIC_TAG",
+            "attributes": {"rel": "preload reason=SYNTHETIC_REASON", "async": True},
+        },
+        "page": {
+            "url": "https://app.example.test/checkout?reference=SYNTHETIC_REF",
+            "referrer": "https://app.example.test/cart?file=SYNTHETIC_FILE",
+            "ready_state": "complete",
+            "visibility_state": "visible",
+        },
+        "opaque": False,
+    }
+    frontend["payload"]["rejection_reason"] = {
+        "kind": "error",
+        "name": "TypeError",
+        "message": "fetch failed reason=SYNTHETIC_REASON",
+        "preview": "tag=SYNTHETIC_TAG",
+    }
+    frontend["payload"]["resource_observations"] = {
+        "version": 1,
+        "items": [
+            {
+                "kind": "timing",
+                "observed_at": "2026-10-26T10:00:00Z",
+                "source_url": "https://cdn.example.test/tag=SYNTHETIC_TAG/bundle.js",
+                "availability": "observed",
+                "response_status": 502,
+                "duration_ms": 20,
+                "transfer_size_bytes": 0,
+            }
+        ],
+    }
+
+    custom_tag_frontend = json.loads(json.dumps(frontend))
+    custom_tag_frontend["event_id"] = str(uuid.uuid4())
+    custom_tag_frontend["payload"]["browser_event"]["target"]["tag_name"] = "custom-element"
+
+    response = handler.handle(request([frontend, custom_tag_frontend]))
+    assert response.status == 202
+    assert response.body["accepted"] == 2
+
+    delivered = accepted[0].events[0]
+    assert delivered["context"]["evidence_reference"] == {
+        "version": 1,
+        "failure_ref": failure_ref,
+        "scope": {"kind": "page", "page_id": page_id},
+    }
+    assert delivered["context"]["evidence_limits"] == {"version": 1, "execution": "unsupported"}
+    assert delivered["context"]["payout"] == {
+        "tag": "[REDACTED]",
+        "reference": "[REDACTED]",
+        "reason": "[REDACTED]",
+        "file": "[REDACTED]",
+    }
+    assert delivered["payload"]["browser_event"]["target"]["tag_name"] == "script"
+    assert delivered["payload"]["browser_event"]["target"]["source_url"] == (
+        "https://cdn.example.test/bundle.js?token=%5BREDACTED%5D&tag=%5BREDACTED%5D"
+    )
+    assert delivered["payload"]["browser_event"]["target"]["attributes"] == {
+        "rel": "preload reason=[REDACTED]",
+        "async": True,
+    }
+    assert delivered["payload"]["rejection_reason"] == {
+        "kind": "error",
+        "name": "TypeError",
+        "message": "fetch failed reason=[REDACTED]",
+        "preview": "tag=[REDACTED]",
+    }
+    assert delivered["payload"]["exception_evidence"]["unavailable_reason"] is None
+    assert delivered["payload"]["resource_observations"]["items"][0]["source_url"] == (
+        "https://cdn.example.test/tag=[REDACTED]"
+    )
+    assert accepted[0].events[1]["payload"]["browser_event"]["target"]["tag_name"] == "[REDACTED]"
+
+    encoded = json.dumps(accepted[0].events)
+    for secret in ("SYNTHETIC_TAG", "SYNTHETIC_REF", "SYNTHETIC_REASON", "SYNTHETIC_FILE", "SYNTHETIC_TOKEN"):
+        assert secret not in encoded
+
+
+def test_relay_redact_exact_fields_and_framework_factories() -> None:
+    from debugbundle.integrations.relay_django import create_django_relay_view
+    from debugbundle.integrations.relay_fastapi import create_fastapi_relay_handler
+    from debugbundle.integrations.relay_flask import create_flask_relay_handler
+
+    accepted: list[Any] = []
+    handler = BrowserRelayHandler(
+        evidence_capabilities=PIN,
+        redact_exact_fields=["tag"],
+        on_accept=accepted.append,
+    )
+    frontend = event()
+    frontend["context"] = {
+        "tag": "SYNTHETIC_SECRET",
+        "TAG": "SYNTHETIC_UPPER",
+        "tag_name": "script",
+        "payout_tag": "ok",
+    }
+    frontend["payload"]["message"] = "tag=SYNTHETIC_MSG tag_name=script"
+    analytics = {
+        "schema_version": "2026-03-01",
+        "event_id": str(uuid.uuid4()),
+        "event_type": "analytics_event",
+        "occurred_at": "2026-10-26T10:00:00Z",
+        "sdk_name": "@debugbundle/sdk-browser",
+        "sdk_version": "3.0.0",
+        "service": {"name": "web", "environment": "production"},
+        "correlation": {"session_id": "sess-1"},
+        "payload": {
+            "kind": "action",
+            "custom_dimensions": {"tag": "SYNTHETIC_DIM", "tag_name": "script"},
+        },
+    }
+    response = handler.handle(request([frontend, analytics]))
+    assert response.status == 202
+    delivered_exc, delivered_analytics = accepted[0].events
+    assert delivered_exc["context"] == {
+        "tag": "[REDACTED]",
+        "TAG": "[REDACTED]",
+        "tag_name": "script",
+        "payout_tag": "ok",
+    }
+    assert delivered_exc["payload"]["message"] == "tag=[REDACTED] tag_name=script"
+    assert delivered_analytics["payload"]["custom_dimensions"] == {"tag": "[REDACTED]", "tag_name": "script"}
+
+    # Framework relay factories accept redact_fields and redact_exact_fields cleanly.
+    assert callable(create_django_relay_view(redact_fields=["reference"], redact_exact_fields=["tag"]))
+    assert callable(create_flask_relay_handler(redact_fields=["reference"], redact_exact_fields=["tag"]))
+    assert callable(create_fastapi_relay_handler(redact_fields=["reference"], redact_exact_fields=["tag"]))

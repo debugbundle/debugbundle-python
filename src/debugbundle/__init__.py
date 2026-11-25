@@ -36,6 +36,7 @@ def init(
     capture_exception_evidence: bool = True,
     evidence_capabilities: object = None,
     capture_recovery_observations: bool = False,
+    redact_exact_fields: list[str] | None = None,
 ) -> None:
     _sdk.init(
         project_token=project_token,
@@ -58,6 +59,7 @@ def init(
         capture_exception_evidence=capture_exception_evidence,
         evidence_capabilities=evidence_capabilities,
         capture_recovery_observations=capture_recovery_observations,
+        redact_exact_fields=redact_exact_fields,
     )
 
 

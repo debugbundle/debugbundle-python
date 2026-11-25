@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextvars import ContextVar
 from types import CoroutineType
 
@@ -46,11 +46,16 @@ class InternalDiagnostics:
             self._generation += 1
             # A stalled callback keeps its existing lane across reinitialization.
 
-    def emit(self, diagnostic: dict[str, object], fields: set[str]) -> None:
+    def emit(
+        self,
+        diagnostic: dict[str, object],
+        fields: Collection[object],
+        exact_fields: Collection[object] | None = None,
+    ) -> None:
         if in_diagnostic() or self._callback is None:
             return
         try:
-            protected = sanitize_telemetry(diagnostic, fields)
+            protected = sanitize_telemetry(diagnostic, fields, exact_fields)
             if type(protected) is not dict:
                 return
             if len(json.dumps(protected, ensure_ascii=False).encode("utf-8")) > 4096:

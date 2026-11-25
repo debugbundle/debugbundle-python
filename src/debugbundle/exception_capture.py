@@ -40,7 +40,7 @@ def capture_exception(
         if not admit_identity(sdk, error, automatic):
             return
         name, message, stack = exception_details(error)
-        redacted_context = redact_mapping(dict(context or {}), sdk._redact_fields)
+        redacted_context = redact_mapping(dict(context or {}), sdk._redact_fields, sdk._redact_exact_fields)
         request_payload = backend_exception_request_payload(redacted_context.get("request"))
         response_payload = backend_exception_response_payload(redacted_context.get("response"))
 

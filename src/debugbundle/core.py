@@ -27,6 +27,7 @@ from .config import (
     find_matching_remote_probe_directives,
 )
 from .diagnostic_budget import DiagnosticCaptureBudget
+from .event_privacy import protect_event_fields
 from .event_support import (
     DEFAULT_LOG_LEVEL,
     LEVEL_RANKS,
@@ -54,7 +55,7 @@ from .recovery_capture import capture_recovery
 from .redaction import (
     DEFAULT_REDACT_FIELDS,
     UnsafeTelemetry,
-    has_safe_event_identity,
+    coerce_config_fields,
     redact_value,
     sanitize_telemetry,
 )
@@ -105,6 +106,8 @@ class DebugBundleSdk:
         self._log_level = DEFAULT_LOG_LEVEL
         self._sample_rate = 1.0
         self._redact_fields = set(DEFAULT_REDACT_FIELDS)
+        self._custom_redact_fields: tuple[object, ...] = ()
+        self._redact_exact_fields: tuple[object, ...] = ()
         self._buffer: list[dict[str, object]] = []
         self._buffer_sizes: dict[int, int] = {}
         self._buffer_bytes = 0
@@ -190,6 +193,7 @@ class DebugBundleSdk:
         capture_exception_evidence: bool = True,
         evidence_capabilities: object = None,
         capture_recovery_observations: bool = False,
+        redact_exact_fields: list[str] | None = None,
     ) -> None:
         ensure_current_process(self)
         with self._lock:
@@ -203,9 +207,14 @@ class DebugBundleSdk:
             self._flush_interval = max(0.1, flush_interval)
             self._log_level = normalize_level(log_level)
             self._sample_rate = min(max(sample_rate, 0.0), 1.0)
+            self._custom_redact_fields = coerce_config_fields(redact_fields)
+            self._redact_exact_fields = coerce_config_fields(redact_exact_fields)
             self._redact_fields = set(DEFAULT_REDACT_FIELDS)
-            if redact_fields:
-                self._redact_fields.update(field.lower() for field in redact_fields)
+            self._redact_fields.update(
+                field.lower()
+                for field in self._custom_redact_fields
+                if isinstance(field, str) and field.strip()
+            )
             self._max_probe_labels = max(1, max_probe_labels)
             self._max_probe_entries_per_label = max(1, max_probe_entries_per_label)
             self._probe_flush_on_error = probe_flush_on_error
@@ -297,7 +306,7 @@ class DebugBundleSdk:
                 "attributes": {},
             }
             if context:
-                payload["attributes"] = redact_mapping(dict(context), self._redact_fields)
+                payload["attributes"] = redact_mapping(dict(context), self._redact_fields, self._redact_exact_fields)
             event = self._protect_event(self._base_event("log_event", payload, context=context))
             if event is None or not self._passes_sample_rate():
                 return
@@ -329,9 +338,9 @@ class DebugBundleSdk:
             ):
                 return
             payload = request_event_payload(
-                redact_mapping(dict(request), self._redact_fields),
-                redact_mapping(dict(response or {}), self._redact_fields),
-                redact_mapping(dict(context or {}), self._redact_fields),
+                redact_mapping(dict(request), self._redact_fields, self._redact_exact_fields),
+                redact_mapping(dict(response or {}), self._redact_fields, self._redact_exact_fields),
+                redact_mapping(dict(context or {}), self._redact_fields, self._redact_exact_fields),
             )
             event = self._protect_event(self._base_event("request_event", payload, context=context))
             if event is None or not self._passes_sample_rate():
@@ -356,10 +365,15 @@ class DebugBundleSdk:
     ) -> None:
         self.capture_log(message, level=level or DEFAULT_LOG_LEVEL, context=context)
 
+    def _sanitize_telemetry(self, value: Any) -> Any:
+        if self._redact_exact_fields:
+            return sanitize_telemetry(value, self._custom_redact_fields, self._redact_exact_fields)
+        return sanitize_telemetry(value, self._custom_redact_fields)
+
     def set_context(self, key: str, value: object) -> None:
         try:
             ensure_current_process(self)
-            protected = sanitize_telemetry({key: value}, self._redact_fields)
+            protected = self._sanitize_telemetry({key: value})
             if not isinstance(protected, dict) or not try_capture_lock(self, allow_diagnostic=True):
                 return
             try:
@@ -379,7 +393,7 @@ class DebugBundleSdk:
                 continue
             scoped_context[str(key)] = value
         try:
-            protected = sanitize_telemetry(scoped_context, self._redact_fields)
+            protected = self._sanitize_telemetry(scoped_context)
             return bind_context(self, cast(dict[str, object], protected))
         except UnsafeTelemetry:
             return bind_context(self, {})
@@ -516,7 +530,7 @@ class DebugBundleSdk:
         merged.update(context_value(self))
         if context is not None:
             merged.update({str(key): value for key, value in context.items()})
-        return cast(dict[str, object], redact_value(merged, self._redact_fields))
+        return cast(dict[str, object], redact_value(merged, self._redact_fields, self._redact_exact_fields))
 
     def _protect_event(self, event: dict[str, object]) -> dict[str, object] | None:
         try:
@@ -524,12 +538,9 @@ class DebugBundleSdk:
             if selected is None:
                 return None
             event = selected
-            if not has_safe_event_identity(event, self._redact_fields):
+            candidate = protect_event_fields(event, self._custom_redact_fields, self._redact_exact_fields)
+            if candidate is None:
                 return None
-            candidate = dict(event)
-            for key in ("payload", "context", "service"):
-                if key in candidate:
-                    candidate[key] = sanitize_telemetry(candidate[key], self._redact_fields)
             if not valid_owned_event(candidate) or not validate_evidence(candidate):
                 fallback = without_optional(candidate)
                 return self._protect_event(fallback) if fallback is not None else None
@@ -668,7 +679,7 @@ class DebugBundleSdk:
         self._remote_config_timer.start()
 
     def _receive_diagnostic(self, diagnostic: dict[str, object]) -> None:
-        self._internal_diagnostics.emit(diagnostic, self._redact_fields)
+        self._internal_diagnostics.emit(diagnostic, self._custom_redact_fields, self._redact_exact_fields)
 
     def _emit_diagnostic(self, code: str, message: str, metadata: dict[str, object] | None = None) -> None:
         self._receive_diagnostic({"code": code, "message": message, **({"metadata": metadata} if metadata else {})})

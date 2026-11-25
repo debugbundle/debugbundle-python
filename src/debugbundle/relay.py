@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from .before_send import _is_valid_event
+from .event_privacy import protect_event_fields
 from .evidence_delivery import EvidenceDelivery
 from .evidence_wire import strip_unsupported, validate_evidence, without_optional
-from .redaction import UnsafeTelemetry, has_safe_event_identity, sanitize_telemetry
+from .redaction import UnsafeTelemetry, coerce_config_fields
 from .relay_delivery import (
     AtomicRelayFileTransport,
     RelayForwardTransport,
@@ -67,6 +68,8 @@ class BrowserRelayHandler:
     environment: str | None = None
     forward_transport: Callable[[Mapping[str, object]], object] | None = None
     evidence_capabilities: object = None
+    redact_fields: list[str] | None = None
+    redact_exact_fields: list[str] | None = None
 
     def __post_init__(self) -> None:
         self.allowed_origins = [o for o in self.allowed_origins if o]
@@ -76,6 +79,8 @@ class BrowserRelayHandler:
         self.project_mode = normalized_project_mode or None
         if self.project_mode not in {None, "connected", "local-only"}:
             self.project_mode = None
+        self._custom_redact_fields = coerce_config_fields(self.redact_fields)
+        self._redact_exact_fields = coerce_config_fields(self.redact_exact_fields)
         self._rate_limit_state: dict[str, list[int]] = {}
         self._local_transports: dict[str, AtomicRelayFileTransport] = {}
         self._spool_transports: dict[str, AtomicRelayFileTransport] = {}
@@ -177,7 +182,13 @@ class BrowserRelayHandler:
                 indexed_errors.append({"index": index, "reason": "invalid_event"})
                 continue
 
-            sanitized = _sanitize_event(candidate, service_override=self.service, environment_override=self.environment)
+            sanitized = _sanitize_event(
+                candidate,
+                service_override=self.service,
+                environment_override=self.environment,
+                redact_fields=self._custom_redact_fields,
+                redact_exact_fields=self._redact_exact_fields,
+            )
             if sanitized is not None and sanitized["event_type"] != "analytics_event":
                 sanitized = strip_unsupported(sanitized, self._evidence.features)
             if sanitized is not None and self._forwarder is not None and self.project_token:
@@ -361,6 +372,8 @@ def _sanitize_event(
     event: dict[str, Any],
     service_override: str | None = None,
     environment_override: str | None = None,
+    redact_fields: Collection[object] | None = None,
+    redact_exact_fields: Collection[object] | None = None,
 ) -> dict[str, Any] | None:
     schema_version = event.get("schema_version")
     event_id = event.get("event_id")
@@ -445,16 +458,27 @@ def _sanitize_event(
         return None
 
     try:
-        if not has_safe_event_identity(sanitized):
+        protected = protect_event_fields(
+            sanitized,
+            redact_fields,
+            redact_exact_fields,
+            preserve_protocol=event_type != "analytics_event",
+        )
+        if protected is None:
             return None
-        sanitized["payload"] = sanitize_telemetry(sanitized["payload"])
-        sanitized["service"] = sanitize_telemetry(sanitized["service"])
-        if "context" in sanitized:
-            sanitized["context"] = sanitize_telemetry(sanitized["context"])
+        sanitized = protected
     except UnsafeTelemetry:
         fallback = without_optional(sanitized) if evidence else None
-        return _sanitize_event(fallback, service_override, environment_override) if fallback is not None else None
+        return (
+            _sanitize_event(fallback, service_override, environment_override, redact_fields, redact_exact_fields)
+            if fallback is not None
+            else None
+        )
     if evidence and (not _is_valid_event(sanitized) or not validate_evidence(sanitized)):
         fallback = without_optional(sanitized)
-        return _sanitize_event(fallback, service_override, environment_override) if fallback is not None else None
+        return (
+            _sanitize_event(fallback, service_override, environment_override, redact_fields, redact_exact_fields)
+            if fallback is not None
+            else None
+        )
     return sanitized

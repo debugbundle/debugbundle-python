@@ -32,6 +32,7 @@ def test_module_init_exposes_contract_friendly_signature() -> None:
         "capture_exception_evidence",
         "evidence_capabilities",
         "capture_recovery_observations",
+        "redact_exact_fields",
     ]
 
 
@@ -124,6 +125,7 @@ def test_module_wrappers_delegate_to_singleton_sdk(monkeypatch) -> None:
             service="checkout-api",
             enabled=False,
             redact_fields=["authorization"],
+            redact_exact_fields=["tag"],
             sample_rate=0.5,
             batch_size=10,
             flush_interval=1.5,
@@ -165,6 +167,7 @@ def test_module_wrappers_delegate_to_singleton_sdk(monkeypatch) -> None:
         "capture_async",
     ]
     assert calls[0][2]["project_token"] == "dbundle_proj_test"
+    assert calls[0][2]["redact_exact_fields"] == ["tag"]
     assert calls[0][2]["probes_poll_interval"] == 15_000
     assert calls[1][1][0] is error
     assert calls[4][2]["response"] == response

@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timezone
 from importlib import metadata
 from typing import Any, cast
@@ -41,9 +41,13 @@ def level_enabled(candidate: str, threshold: str) -> bool:
     return LEVEL_RANKS[candidate] >= LEVEL_RANKS[threshold]
 
 
-def redact_mapping(value: object, redact_fields: set[str]) -> Any:
+def redact_mapping(
+    value: object,
+    redact_fields: set[str],
+    exact_fields: Collection[object] | None = None,
+) -> Any:
     if isinstance(value, Mapping):
-        return redact_value(value, redact_fields)
+        return redact_value(value, redact_fields, exact_fields)
     return value
 
 
